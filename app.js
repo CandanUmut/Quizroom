@@ -1,36 +1,37 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-  // ===================== Supabase =====================
+// =============================================================
+// Supabase config & constants
+// =============================================================
 const SUPABASE_URL = "https://rnatxpcjqszgjlvznhwd.supabase.co";
 const SUPABASE_ANON_KEY =
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJuYXR4cGNqcXN6Z2psdnpuaHdkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUzMTA4OTEsImV4cCI6MjA4MDg4Njg5MX0.rwuFyq0XdXDG822d2lUqdxHvTq4OAIUtdXebh0aXCCc";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJuYXR4cGNqcXN6Z2psdnpuaHdkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUzMTA4OTEsImV4cCI6MjA4MDg4Njg5MX0.rwuFyq0XdXDG822d2lUqdxHvTq4OAIUtdXebh0aXCCc";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// --- Local storage key'leri ---
 const LS_CLIENT_ID = "quiz_client_id_v1";
+const LS_LAST_ROOM = "quiz_last_room_slug";
+const LS_LAST_NAME = "quiz_last_participant_name";
 
+// =============================================================
+// Global state & helpers
+// =============================================================
 let clientId = null;
 let currentRoom = null;
 let me = null; // quiz_participants row
 let participants = [];
 let questions = [];
-
 let roomChannel = null;
 let timerInterval = null;
 let currentQuestion = null;
 let questionEndTime = null;
 let hasAnsweredCurrent = false;
-
-// --- Utility ---
+let confettiTimeout = null;
+let confettiPlayed = false;
 
 function ensureClientId() {
   let id = localStorage.getItem(LS_CLIENT_ID);
   if (!id) {
-    if (crypto && crypto.randomUUID) {
-      id = crypto.randomUUID();
-    } else {
-      id = "c_" + Math.random().toString(36).slice(2);
-    }
+    id = crypto?.randomUUID ? crypto.randomUUID() : `c_${Math.random()}`;
     localStorage.setItem(LS_CLIENT_ID, id);
   }
   clientId = id;
@@ -56,10 +57,25 @@ function shuffle(arr) {
   return copy;
 }
 
-// --- DOM refs ---
+function humanizeStatus(status) {
+  if (status === "collecting") return "Collecting questions";
+  if (status === "playing") return "Quiz in progress";
+  if (status === "finished") return "Round finished";
+  return status || "-";
+}
 
+function logError(context, error) {
+  if (error) {
+    console.error(`[${context}]`, error.message || error);
+  }
+}
+
+// =============================================================
+// DOM references
+// =============================================================
 const lobbySection = document.getElementById("lobby-section");
 const roomSection = document.getElementById("room-section");
+const rejoinNoticeEl = document.getElementById("rejoin-notice");
 
 const createNameInput = document.getElementById("create-name");
 const createTimeLimitInput = document.getElementById("create-time-limit");
@@ -75,6 +91,7 @@ const roomTitleEl = document.getElementById("room-title");
 const roomCodeEl = document.getElementById("room-code");
 const roomHostEl = document.getElementById("room-host");
 const roomStatusEl = document.getElementById("room-status");
+const participantCountEl = document.getElementById("participant-count");
 const roomQuestionCountEl = document.getElementById("room-question-count");
 const roomLinkEl = document.getElementById("room-link");
 const participantsListEl = document.getElementById("participants-list");
@@ -84,6 +101,9 @@ const backToLobbyBtn = document.getElementById("back-to-lobby-btn");
 const collectView = document.getElementById("collect-view");
 const playView = document.getElementById("play-view");
 const resultsView = document.getElementById("results-view");
+const collectStatusPill = document.getElementById("collect-status-pill");
+const playStatusPill = document.getElementById("play-status-pill");
+const resultsStatusPill = document.getElementById("results-status-pill");
 
 const questionTypeSelect = document.getElementById("question-type");
 const questionTextInput = document.getElementById("question-text");
@@ -110,10 +130,13 @@ const playQuestionTextEl = document.getElementById("play-question-text");
 const playOptionsEl = document.getElementById("play-options");
 const answerFeedbackEl = document.getElementById("answer-feedback");
 
+const resultsSummaryEl = document.getElementById("results-summary");
 const resultsListEl = document.getElementById("results-list");
+const confettiContainer = document.getElementById("confetti-container");
 
-// --- Event listeners ---
-
+// =============================================================
+// Event listeners
+// =============================================================
 createRoomBtn.addEventListener("click", createRoom);
 joinRoomBtn.addEventListener("click", joinRoom);
 backToLobbyBtn.addEventListener("click", backToLobby);
@@ -130,19 +153,17 @@ questionTypeSelect.addEventListener("change", () => {
   }
 });
 
-// --- Supabase helpers ---
-
+// =============================================================
+// Supabase helpers
+// =============================================================
 async function fetchRoomBySlug(slug) {
   const { data, error } = await supabase
     .from("quiz_rooms")
     .select("*")
     .eq("slug", slug)
     .maybeSingle();
-  if (error) {
-    console.warn("quiz_rooms fetch error", error.message);
-    return null;
-  }
-  return data;
+  logError("fetchRoomBySlug", error);
+  return data || null;
 }
 
 async function fetchParticipants(roomId) {
@@ -151,41 +172,71 @@ async function fetchParticipants(roomId) {
     .select("*")
     .eq("room_id", roomId)
     .order("created_at", { ascending: true });
-  if (!error && data) {
-    participants = data;
-    if (me) {
-      const mine = participants.find((p) => p.id === me.id);
-      if (mine) me = mine;
-    }
-    renderParticipants();
+
+  if (error) {
+    console.error("fetchParticipants error", error.message);
+    return;
   }
+  participants = data || [];
+  if (me) {
+    const mine = participants.find((p) => p.id === me.id);
+    if (mine) me = mine;
+  }
+  renderParticipants();
 }
 
+/** Fetch questions for the room and render. */
 async function fetchQuestions(roomId) {
   const { data, error } = await supabase
     .from("quiz_questions")
     .select("*")
     .eq("room_id", roomId)
     .order("created_at", { ascending: true });
-  if (!error && data) {
-    questions = data;
-    renderQuestions();
+  if (error) {
+    console.error("fetchQuestions error", error.message);
+    questionErrorEl.textContent = "Sorular alınamadı: " + error.message;
+    return;
   }
+  questions = data || [];
+  renderQuestions();
 }
 
-// --- Room enter/leave ---
+async function findExistingParticipant(roomId) {
+  const { data, error } = await supabase
+    .from("quiz_participants")
+    .select("*")
+    .eq("room_id", roomId)
+    .eq("client_id", clientId)
+    .maybeSingle();
+  logError("findExistingParticipant", error);
+  return data || null;
+}
 
+// =============================================================
+// Room enter/leave
+// =============================================================
+/**
+ * Enter a room after creation/join.
+ * - Saves last room/name to localStorage for auto-rejoin
+ * - Binds realtime listeners and fetches initial data
+ */
 function enterRoom(room, participant) {
   currentRoom = room;
   me = participant;
+  localStorage.setItem(LS_LAST_ROOM, room.slug);
+  if (participant?.name) localStorage.setItem(LS_LAST_NAME, participant.name);
+
   lobbySection.classList.add("hidden");
   roomSection.classList.remove("hidden");
+  rejoinNoticeEl.classList.add("hidden");
+
   attachRealtime(room.id);
   renderRoom();
   fetchParticipants(room.id);
   fetchQuestions(room.id);
 }
 
+/** Reset UI and state back to lobby. */
 function backToLobby() {
   if (roomChannel) {
     supabase.removeChannel(roomChannel);
@@ -202,22 +253,25 @@ function backToLobby() {
   currentQuestion = null;
   questionEndTime = null;
   hasAnsweredCurrent = false;
+  confettiPlayed = false;
 
   lobbySection.classList.remove("hidden");
   roomSection.classList.add("hidden");
 
-  // Temizle
   hostControlsEl.innerHTML = "";
   participantsListEl.innerHTML = "";
   resultsListEl.innerHTML = "";
+  resultsSummaryEl.innerHTML = "";
   roomQuestionsListEl.innerHTML = "";
   myQuestionsListEl.innerHTML = "";
   playOptionsEl.innerHTML = "";
   answerFeedbackEl.textContent = "";
 }
 
-// --- Create / Join room ---
-
+// =============================================================
+// Create / Join room
+// =============================================================
+/** Create a new room as host and join it. */
 async function createRoom() {
   createErrorEl.textContent = "";
   const name = createNameInput.value.trim();
@@ -244,27 +298,19 @@ async function createRoom() {
 
   if (roomErr) {
     createErrorEl.textContent = roomErr.message;
+    logError("createRoom", roomErr);
     return;
   }
 
-  const { data: participant, error: pErr } = await supabase
-    .from("quiz_participants")
-    .insert({
-      room_id: room.id,
-      client_id: clientId,
-      name,
-    })
-    .select()
-    .single();
-
-  if (pErr) {
-    createErrorEl.textContent = pErr.message;
-    return;
-  }
+  const participant =
+    (await findExistingParticipant(room.id)) ||
+    (await insertParticipant(room.id, name, createErrorEl));
+  if (!participant) return;
 
   enterRoom(room, participant);
 }
 
+/** Join an existing room by slug. */
 async function joinRoom() {
   joinErrorEl.textContent = "";
   const name = joinNameInput.value.trim();
@@ -286,26 +332,30 @@ async function joinRoom() {
     return;
   }
 
-  const { data: participant, error: pErr } = await supabase
-    .from("quiz_participants")
-    .insert({
-      room_id: room.id,
-      client_id: clientId,
-      name,
-    })
-    .select()
-    .single();
-
-  if (pErr) {
-    joinErrorEl.textContent = pErr.message;
-    return;
-  }
+  const existing = await findExistingParticipant(room.id);
+  const participant = existing || (await insertParticipant(room.id, name, joinErrorEl));
+  if (!participant) return;
 
   enterRoom(room, participant);
 }
 
-// --- Realtime ---
+async function insertParticipant(roomId, name, errorEl) {
+  const { data, error } = await supabase
+    .from("quiz_participants")
+    .insert({ room_id: roomId, client_id: clientId, name })
+    .select()
+    .single();
+  if (error) {
+    logError("insertParticipant", error);
+    if (errorEl) errorEl.textContent = error.message;
+    return null;
+  }
+  return data;
+}
 
+// =============================================================
+// Realtime
+// =============================================================
 function attachRealtime(roomId) {
   if (roomChannel) {
     supabase.removeChannel(roomChannel);
@@ -340,17 +390,19 @@ function attachRealtime(roomId) {
     .subscribe();
 }
 
-// --- Render helpers ---
-
+// =============================================================
+// Render helpers
+// =============================================================
 function renderParticipants() {
   participantsListEl.innerHTML = "";
+  participantCountEl.textContent = participants.length.toString();
+
   participants.forEach((p) => {
     const li = document.createElement("li");
-    if (me && p.id === me.id) {
-      li.classList.add("participant-me");
-    }
     const isHost = currentRoom && currentRoom.host_name === p.name;
-    li.textContent = p.name + (isHost ? " · Host" : "");
+    if (me && p.id === me.id) li.classList.add("participant-me");
+    if (isHost) li.classList.add("participant-host");
+    li.textContent = `${p.name}${isHost ? " · Host" : ""}${me && p.id === me.id ? " · Sen" : ""}`;
     participantsListEl.appendChild(li);
   });
 }
@@ -360,20 +412,29 @@ function renderQuestions() {
   myQuestionsListEl.innerHTML = "";
   roomQuestionsListEl.innerHTML = "";
 
+  const authorName = (id) => participants.find((p) => p.id === id)?.name || "?";
+
   questions.forEach((q, idx) => {
+    const timeInfo = `${q.time_limit_sec || currentRoom?.default_time_limit_sec || 20} sn`;
+    const metaText = `${q.question_type?.toUpperCase() || "?"} · ${timeInfo}`;
+
     const liRoom = document.createElement("li");
-    liRoom.innerHTML = `<strong>${idx + 1}.</strong> ${q.text}`;
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    meta.textContent = `${q.question_type.toUpperCase()} · süre: ${
-      q.time_limit_sec || currentRoom.default_time_limit_sec
-    } sn`;
-    liRoom.appendChild(meta);
+    const metaBlock = document.createElement("div");
+    metaBlock.className = "question-meta-block";
+    metaBlock.innerHTML = `<strong>${idx + 1}.</strong> ${q.text || "(boş soru)"}<span class="meta">${metaText} · ${authorName(q.author_participant_id)}</span>`;
+    liRoom.appendChild(metaBlock);
     roomQuestionsListEl.appendChild(liRoom);
 
     if (me && q.author_participant_id === me.id) {
       const liMine = document.createElement("li");
-      liMine.innerHTML = `<strong>${idx + 1}.</strong> ${q.text}`;
+      liMine.appendChild(metaBlock.cloneNode(true));
+      if (currentRoom?.status === "collecting") {
+        const btn = document.createElement("button");
+        btn.className = "delete-btn small";
+        btn.textContent = "Sil";
+        btn.onclick = () => deleteQuestion(q.id);
+        liMine.appendChild(btn);
+      }
       myQuestionsListEl.appendChild(liMine);
     }
   });
@@ -385,11 +446,13 @@ function renderRoom() {
   roomTitleEl.textContent = "Oda";
   roomCodeEl.textContent = currentRoom.slug;
   roomHostEl.textContent = currentRoom.host_name || "-";
-  roomStatusEl.textContent = currentRoom.status;
+  roomStatusEl.textContent = humanizeStatus(currentRoom.status);
+  collectStatusPill.textContent = humanizeStatus(currentRoom.status);
+  playStatusPill.textContent = humanizeStatus(currentRoom.status);
+  resultsStatusPill.textContent = humanizeStatus(currentRoom.status);
   roomQuestionCountEl.textContent = questions.length.toString();
-  const link = `${window.location.origin}${window.location.pathname}?room=${
-    currentRoom.slug
-  }`;
+
+  const link = `${window.location.origin}${window.location.pathname}?room=${currentRoom.slug}`;
   roomLinkEl.href = link;
   roomLinkEl.textContent = link;
 
@@ -407,6 +470,7 @@ function renderHostControls() {
     const btnStart = document.createElement("button");
     btnStart.textContent = "Quiz'i Başlat";
     btnStart.onclick = startQuiz;
+    if (!questions.length) btnStart.disabled = true;
     hostControlsEl.appendChild(btnStart);
   } else if (currentRoom.status === "playing") {
     const btnNext = document.createElement("button");
@@ -446,11 +510,14 @@ function renderPhaseViews() {
     resultsView.classList.remove("hidden");
     stopTimer();
     loadAndRenderResults();
+    triggerConfetti();
   }
 }
 
-// --- Question adding ---
-
+// =============================================================
+// Question management
+// =============================================================
+/** Insert a question for the current player. */
 async function addQuestion() {
   questionErrorEl.textContent = "";
   if (!currentRoom || !me) {
@@ -476,8 +543,7 @@ async function addQuestion() {
       optionDInput.value.trim(),
     ].filter((v) => v);
     if (opts.length < 2) {
-      questionErrorEl.textContent =
-        "En az iki seçenek (A ve B) doldurmalısın.";
+      questionErrorEl.textContent = "En az iki seçenek (A ve B) doldurmalısın.";
       return;
     }
     options = opts;
@@ -494,22 +560,30 @@ async function addQuestion() {
     timeLimit = rawLimit;
   }
 
-  const { error } = await supabase.from("quiz_questions").insert({
-    room_id: currentRoom.id,
-    author_participant_id: me.id,
-    question_type: type,
-    text,
-    options,
-    correct_index: correctIndex,
-    time_limit_sec: timeLimit,
-  });
+  const { data, error } = await supabase
+    .from("quiz_questions")
+    .insert({
+      room_id: currentRoom.id,
+      author_participant_id: me.id,
+      question_type: type,
+      text,
+      options,
+      correct_index: correctIndex,
+      time_limit_sec: timeLimit,
+    })
+    .select()
+    .single();
 
   if (error) {
+    logError("addQuestion", error);
     questionErrorEl.textContent = error.message;
     return;
   }
 
-  // Temizle
+  // Optimistic update
+  questions.push(data);
+  renderQuestions();
+
   questionTextInput.value = "";
   optionAInput.value = "";
   optionBInput.value = "";
@@ -518,8 +592,22 @@ async function addQuestion() {
   questionTimeLimitInput.value = "";
 }
 
-// --- Quiz start / navigation (HOST) ---
+async function deleteQuestion(questionId) {
+  if (!currentRoom || !me) return;
+  const { error } = await supabase
+    .from("quiz_questions")
+    .delete()
+    .eq("id", questionId)
+    .eq("author_participant_id", me.id);
+  if (error) {
+    alert("Silinemedi: " + error.message);
+  }
+}
 
+// =============================================================
+// Quiz start / navigation (HOST)
+// =============================================================
+/** Host starts quiz: randomizes order and kicks off first question. */
 async function startQuiz() {
   if (!currentRoom) return;
   if (!me || currentRoom.host_name !== me.name) return;
@@ -549,9 +637,11 @@ async function startQuiz() {
     return;
   }
   currentRoom = data;
+  hasAnsweredCurrent = false;
   renderRoom();
 }
 
+/** Host moves to the next question or finishes when out of questions. */
 async function nextQuestion() {
   if (!currentRoom) return;
   if (!me || currentRoom.host_name !== me.name) return;
@@ -561,7 +651,6 @@ async function nextQuestion() {
   const nextIndex = currentIndex + 1;
 
   if (nextIndex >= currentRoom.question_order.length) {
-    // Son soruydu, bitirelim
     await finishQuiz();
     return;
   }
@@ -582,18 +671,18 @@ async function nextQuestion() {
     return;
   }
   currentRoom = data;
+  hasAnsweredCurrent = false;
   renderRoom();
 }
 
+/** Host marks quiz finished so results can be shown. */
 async function finishQuiz() {
   if (!currentRoom) return;
   if (!me || currentRoom.host_name !== me.name) return;
 
   const { data, error } = await supabase
     .from("quiz_rooms")
-    .update({
-      status: "finished",
-    })
+    .update({ status: "finished" })
     .eq("id", currentRoom.id)
     .select()
     .single();
@@ -606,6 +695,7 @@ async function finishQuiz() {
   renderRoom();
 }
 
+/** Host resets room to collecting state but keeps questions. */
 async function resetToCollecting() {
   if (!currentRoom) return;
   if (!me || currentRoom.host_name !== me.name) return;
@@ -623,56 +713,43 @@ async function resetToCollecting() {
     .single();
 
   if (error) {
-    alert("Oda sıfırlanamadı: " + error.message);
+    alert("Sıfırlanamadı: " + error.message);
     return;
   }
   currentRoom = data;
+  confettiPlayed = false;
   renderRoom();
 }
 
-// --- Play view & timer ---
-
-function stopTimer() {
-  if (timerInterval) {
-    clearInterval(timerInterval);
-    timerInterval = null;
-  }
-  timerBarFill.style.width = "0%";
-  timerDisplayEl.textContent = "--";
-  questionEndTime = null;
-}
-
+// =============================================================
+// Play view (participants)
+// =============================================================
+/** Render the currently active question in play mode. */
 function renderCurrentQuestion() {
-  if (!currentRoom || currentRoom.status !== "playing") return;
-  if (!currentRoom.question_order || !currentRoom.question_order.length) return;
-
-  const index = currentRoom.current_question_index || 0;
-  const questionId = currentRoom.question_order[index];
-  const q = questions.find((qq) => qq.id === questionId);
-  currentQuestion = q || null;
-  hasAnsweredCurrent = false;
-  answerFeedbackEl.textContent = "";
-
-  playOptionsEl.innerHTML = "";
-  if (!currentQuestion) {
-    playQuestionCounterEl.textContent = `Soru ${index + 1}`;
-    playQuestionTextEl.textContent = "Soru yükleniyor...";
-    stopTimer();
+  if (!currentRoom || !currentRoom.question_order || currentRoom.question_order.length === 0) {
+    playQuestionTextEl.textContent = "Sorular yükleniyor...";
+    playOptionsEl.innerHTML = "";
     return;
   }
 
-  playQuestionCounterEl.textContent = `Soru ${index + 1} / ${
-    currentRoom.question_order.length
-  }`;
-  playQuestionTextEl.textContent = currentQuestion.text;
+  const idx = currentRoom.current_question_index || 0;
+  const questionId = currentRoom.question_order[idx];
+  currentQuestion = questions.find((q) => q.id === questionId);
 
-  const opts =
-    currentQuestion.options ||
-    (currentQuestion.question_type === "tf"
-      ? ["Doğru", "Yanlış"]
-      : []);
+  if (!currentQuestion) {
+    playQuestionTextEl.textContent = "Soru bulunamadı.";
+    playOptionsEl.innerHTML = "";
+    return;
+  }
 
-  opts.forEach((optText, i) => {
+  hasAnsweredCurrent = false;
+  answerFeedbackEl.textContent = "";
+
+  playQuestionCounterEl.textContent = `Soru ${idx + 1}/${currentRoom.question_order.length}`;
+  playQuestionTextEl.textContent = currentQuestion.text || "";
+
+  playOptionsEl.innerHTML = "";
+  (currentQuestion.options || []).forEach((optText, i) => {
     const btn = document.createElement("button");
     btn.className = "option-btn";
     const letter = String.fromCharCode("A".charCodeAt(0) + i);
@@ -681,23 +758,16 @@ function renderCurrentQuestion() {
     playOptionsEl.appendChild(btn);
   });
 
-  // Timer
-  const limit =
-    currentQuestion.time_limit_sec || currentRoom.default_time_limit_sec || 20;
-
-  if (currentRoom.current_question_started_at) {
-    const startedMs = new Date(
-      currentRoom.current_question_started_at
-    ).getTime();
-    questionEndTime = startedMs + limit * 1000;
-  } else {
-    const nowMs = Date.now();
-    questionEndTime = nowMs + limit * 1000;
-  }
+  const limit = currentQuestion.time_limit_sec || currentRoom.default_time_limit_sec || 20;
+  const startedAt = currentRoom.current_question_started_at
+    ? new Date(currentRoom.current_question_started_at).getTime()
+    : Date.now();
+  questionEndTime = startedAt + limit * 1000;
 
   startTimer(limit);
 }
 
+/** Start timer bar & countdown for a question. */
 function startTimer(limitSeconds) {
   stopTimer();
 
@@ -705,7 +775,7 @@ function startTimer(limitSeconds) {
     if (!questionEndTime) return;
     const now = Date.now();
     const total = limitSeconds;
-    const remainingMs = questionEndTime - now;
+    const remainingMs = Math.max(0, questionEndTime - now);
     const remainingSec = remainingMs / 1000;
     timerDisplayEl.textContent = formatSeconds(remainingSec);
 
@@ -724,12 +794,21 @@ function startTimer(limitSeconds) {
   timerInterval = setInterval(tick, 250);
 }
 
+function stopTimer() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+  timerBarFill.style.width = "0%";
+  timerDisplayEl.textContent = "--";
+}
+
+/** Persist an answer for the current player and show quick feedback. */
 async function handleAnswerClick(answerIndex, btnEl) {
   if (!currentQuestion || !me || hasAnsweredCurrent) return;
 
   hasAnsweredCurrent = true;
 
-  // Tüm option butonlarını kilitle
   const buttons = playOptionsEl.querySelectorAll("button");
   buttons.forEach((b) => {
     b.disabled = true;
@@ -748,6 +827,7 @@ async function handleAnswerClick(answerIndex, btnEl) {
 
   if (error) {
     answerFeedbackEl.textContent = "Cevap kaydedilemedi: " + error.message;
+    logError("handleAnswerClick", error);
     return;
   }
 
@@ -756,47 +836,43 @@ async function handleAnswerClick(answerIndex, btnEl) {
     : "Yanlış, olsun sıradaki soruya bakalım.";
 }
 
-// --- Results ---
-
+// =============================================================
+// Results
+// =============================================================
+/** Load participants/answers and render the scoreboard. */
 async function loadAndRenderResults() {
   resultsListEl.innerHTML = "Yükleniyor...";
+  resultsSummaryEl.innerHTML = "";
 
   if (!currentRoom) return;
 
-  // Katılımcıları çek
   const { data: parts, error: pErr } = await supabase
     .from("quiz_participants")
     .select("*")
     .eq("room_id", currentRoom.id);
-
   if (pErr) {
     resultsListEl.textContent = "Katılımcılar alınamadı: " + pErr.message;
     return;
   }
 
-  // Soruları çek
   const { data: qs, error: qErr } = await supabase
     .from("quiz_questions")
     .select("id")
     .eq("room_id", currentRoom.id);
-
   if (qErr) {
     resultsListEl.textContent = "Sorular alınamadı: " + qErr.message;
     return;
   }
-
   if (!qs || !qs.length) {
     resultsListEl.textContent = "Bu odada soru yok.";
     return;
   }
-
   const questionIds = qs.map((q) => q.id);
 
   const { data: ans, error: aErr } = await supabase
     .from("quiz_answers")
     .select("participant_id,is_correct,question_id")
     .in("question_id", questionIds);
-
   if (aErr) {
     resultsListEl.textContent = "Cevaplar alınamadı: " + aErr.message;
     return;
@@ -804,7 +880,6 @@ async function loadAndRenderResults() {
 
   const scoreMap = new Map();
   parts.forEach((p) => scoreMap.set(p.id, 0));
-
   ans.forEach((a) => {
     if (a.is_correct) {
       const prev = scoreMap.get(a.participant_id) || 0;
@@ -814,6 +889,7 @@ async function loadAndRenderResults() {
 
   const rows = parts
     .map((p) => ({
+      id: p.id,
       name: p.name,
       correct: scoreMap.get(p.id) || 0,
     }))
@@ -823,32 +899,56 @@ async function loadAndRenderResults() {
 
   const table = document.createElement("table");
   const thead = document.createElement("thead");
-  thead.innerHTML =
-    "<tr><th>Sıra</th><th>İsim</th><th>Doğru</th><th>Toplam soru</th></tr>";
+  thead.innerHTML = "<tr><th>Sıra</th><th>İsim</th><th>Doğru</th><th>Toplam soru</th></tr>";
   table.appendChild(thead);
 
   const tbody = document.createElement("tbody");
   rows.forEach((row, idx) => {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${idx + 1}</td><td>${row.name}</td><td>${
-      row.correct
-    }</td><td>${totalQuestions}</td>`;
+    tr.classList.add(`rank-${idx + 1}`);
+    tr.innerHTML = `<td>${idx + 1}</td><td>${row.name}</td><td>${row.correct}</td><td>${totalQuestions}</td>`;
     tbody.appendChild(tr);
   });
 
   table.appendChild(tbody);
   resultsListEl.innerHTML = "";
   resultsListEl.appendChild(table);
+
+  if (me) {
+    const mine = rows.find((r) => r.id === me.id);
+    if (mine) {
+      resultsSummaryEl.textContent = `Sen: ${mine.correct}/${totalQuestions} doğru`;
+    }
+  }
 }
 
-// --- Init (URL ile odaya direkt katılma opsiyonu) ---
-
+// =============================================================
+// Auto-rejoin / initialization
+// =============================================================
+/** Try to auto rejoin using ?room= or the last saved room slug. */
 async function autoJoinFromUrl() {
   const params = new URLSearchParams(window.location.search);
-  const roomSlug = params.get("room");
+  const roomSlug = params.get("room") || localStorage.getItem(LS_LAST_ROOM);
+  const lastName = localStorage.getItem(LS_LAST_NAME) || "";
   if (!roomSlug) return;
 
+  ensureClientId();
   joinCodeInput.value = roomSlug.toUpperCase();
+  if (lastName) joinNameInput.value = lastName;
+
+  const room = await fetchRoomBySlug(roomSlug.toUpperCase());
+  if (!room) return;
+
+  const participant = await findExistingParticipant(room.id);
+  if (participant) {
+    rejoinNoticeEl.textContent = `${participant.name} olarak odaya tekrar bağlanılıyor...`;
+    rejoinNoticeEl.classList.remove("hidden");
+    enterRoom(room, participant);
+    return;
+  }
+
+  rejoinNoticeEl.textContent = `${lastName || ""} olarak yeniden katılmak için form hazır.`;
+  rejoinNoticeEl.classList.remove("hidden");
 }
 
 function init() {
@@ -857,3 +957,26 @@ function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+// =============================================================
+// Confetti (lightweight)
+// =============================================================
+function triggerConfetti() {
+  if (confettiPlayed) return;
+  confettiPlayed = true;
+  const colors = ["#38bdf8", "#a855f7", "#f59e0b", "#22c55e", "#ef4444"];
+
+  for (let i = 0; i < 80; i++) {
+    const piece = document.createElement("div");
+    piece.className = "confetti-piece";
+    piece.style.left = Math.random() * 100 + "%";
+    piece.style.background = colors[Math.floor(Math.random() * colors.length)];
+    piece.style.animationDelay = Math.random() * 0.6 + "s";
+    piece.style.transform = `rotate(${Math.random() * 360}deg)`;
+    confettiContainer.appendChild(piece);
+  }
+
+  confettiTimeout = setTimeout(() => {
+    confettiContainer.innerHTML = "";
+  }, 3500);
+}
