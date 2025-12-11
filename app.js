@@ -645,21 +645,13 @@ function backToLobby() {
     supabase.removeChannel(roomChannel);
     roomChannel = null;
   }
-  if (timerInterval) {
-    clearInterval(timerInterval);
-    timerInterval = null;
-  }
+  stopTimer();
+  resetLocalPlayState();
   currentRoom = null;
   me = null;
   participants = [];
   questions = [];
-  currentQuestion = null;
-  questionEndTime = null;
-  questionStartedAtMs = null;
-  hasAnsweredCurrent = false;
-  revealMode = false;
   confettiPlayed = false;
-  resultsRendered = false;
 
   lobbySection.classList.remove("hidden");
   roomSection.classList.add("hidden");
@@ -777,34 +769,35 @@ function attachRealtime(roomId) {
         console.log("[RT rooms]", payload);
         if (!payload.new) return;
         currentRoom = payload.new;
+
         renderRoom();
         renderPhaseViews();
+
         if (currentRoom.status === "playing") {
-          const ensureQuestions = questions.length
-            ? Promise.resolve()
-            : fetchQuestions(roomId);
-          Promise.resolve(ensureQuestions).then(() => {
-            renderCurrentQuestion();
-          });
+          // Ensure we have the latest questions then render the active one
+          fetchQuestions(roomId);
+        } else if (
+          currentRoom.status === "collecting" ||
+          currentRoom.status === "finished"
+        ) {
+          resetLocalPlayState();
         }
       }
     )
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "quiz_participants", filter: `room_id=eq.${roomId}` },
-      () => {
-        console.log("[RT participants] change for room", roomId);
+      (payload) => {
+        console.log("[RT participants]", payload);
         fetchParticipants(roomId);
       }
     )
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "quiz_questions", filter: `room_id=eq.${roomId}` },
-      () => {
-        console.log("[RT questions] change for room", roomId);
-        fetchQuestions(roomId).then(() => {
-          renderRoom();
-        });
+      (payload) => {
+        console.log("[RT questions]", payload);
+        fetchQuestions(roomId);
       }
     )
     .subscribe();
@@ -932,18 +925,19 @@ function renderPhaseViews() {
     collectView.classList.remove("hidden");
     playView.classList.add("hidden");
     resultsView.classList.add("hidden");
-    stopTimer();
-    resultsRendered = false;
+    resetLocalPlayState();
+    confettiPlayed = false;
   } else if (currentRoom.status === "playing") {
     collectView.classList.add("hidden");
     playView.classList.remove("hidden");
     resultsView.classList.add("hidden");
     resultsRendered = false;
-    renderCurrentQuestion();
+    // Rendering the active question is triggered from realtime + fetchQuestions.
   } else if (currentRoom.status === "finished") {
     collectView.classList.add("hidden");
     playView.classList.add("hidden");
     resultsView.classList.remove("hidden");
+    resetLocalPlayState();
     stopTimer();
     if (!resultsRendered) {
       loadAndRenderResults();
@@ -1161,6 +1155,25 @@ async function resetToCollecting() {
     alert("Sıfırlanamadı: " + error.message);
     return;
   }
+
+  const { data: qs, error: qErr } = await supabase
+    .from("quiz_questions")
+    .select("id")
+    .eq("room_id", currentRoom.id);
+
+  if (!qErr) {
+    const ids = (qs || []).map((q) => q.id);
+    if (ids.length) {
+      const { error: delErr } = await supabase
+        .from("quiz_answers")
+        .delete()
+        .in("question_id", ids);
+      if (delErr) {
+        console.error("[resetToCollecting] answers not cleared", delErr.message || delErr);
+      }
+    }
+  }
+
   currentRoom = data;
   confettiPlayed = false;
   renderRoom();
@@ -1272,6 +1285,22 @@ function stopTimer() {
   if (timerCircle) {
     timerCircle.style.background = "conic-gradient(var(--accent-color, #38bdf8) 0deg, var(--card-bg, #111827) 0deg)";
   }
+}
+
+function resetLocalPlayState() {
+  currentQuestion = null;
+  questionStartedAtMs = null;
+  questionEndTime = null;
+  hasAnsweredCurrent = false;
+  revealMode = false;
+  resultsRendered = false;
+  stopTimer();
+  answerFeedbackEl.textContent = "";
+  playQuestionTextEl.textContent = "";
+  playOptionsEl.innerHTML = "";
+  playQuestionCounterEl.textContent = "";
+  timerBarFill.style.width = "0%";
+  timerDisplayEl.textContent = "--";
 }
 
 /** Persist an answer for the current player and show quick feedback. */
