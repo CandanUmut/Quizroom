@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ortak Quiz · Focus Arena</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <header class="app-header">
+        <div>
+          <h1>Ortak Quiz · Focus Arena</h1>
+          <p class="subtitle">
+            Oda aç, herkes soru eklesin, sonra aynı anda quiz oynayıp sıralamayı gör.
+          </p>
+        </div>
+      </header>
+
+      <!-- LOBI -->
+      <section id="lobby-section">
+        <div class="two-cols">
+          <div class="panel">
+            <h2>Yeni Oda Oluştur</h2>
+            <label for="create-name">İsmin</label>
+            <input id="create-name" placeholder="Umut, Nova..." />
+
+            <label for="create-time-limit">Soru süresi (saniye)</label>
+            <input id="create-time-limit" type="number" min="5" max="120" value="20" />
+
+            <button id="create-room-btn">Oda Oluştur</button>
+            <div class="error" id="create-error"></div>
+          </div>
+
+          <div class="panel">
+            <h2>Koda Göre Katıl</h2>
+            <label for="join-name">İsmin</label>
+            <input id="join-name" placeholder="İsmin" />
+
+            <label for="join-code">Oda Kodu</label>
+            <input id="join-code" placeholder="Örn: ABC123" />
+
+            <button class="secondary" id="join-room-btn">Odaya Katıl</button>
+            <div class="hint">
+              Host sana oda kodunu veya linki paylaşabilir.
+            </div>
+            <div class="error" id="join-error"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ODA / QUIZ -->
+      <section id="room-section" class="hidden">
+        <div class="room-header">
+          <div class="room-info-box">
+            <h2 id="room-title">Oda</h2>
+            <p><span class="label">Kod:</span> <span id="room-code">-</span></p>
+            <p><span class="label">Host:</span> <span id="room-host">-</span></p>
+            <p><span class="label">Durum:</span> <span id="room-status">-</span></p>
+            <p><span class="label">Toplam soru:</span> <span id="room-question-count">0</span></p>
+            <p>
+              <span class="label">Link:</span>
+              <a id="room-link" href="#" target="_blank" rel="noreferrer"></a>
+            </p>
+          </div>
+
+          <div class="room-info-box">
+            <h3>Katılımcılar</h3>
+            <ul id="participants-list" class="participants"></ul>
+          </div>
+        </div>
+
+        <div class="room-controls">
+          <div id="host-controls" class="host-controls"></div>
+          <button id="back-to-lobby-btn" class="secondary small">Lobiye Dön</button>
+        </div>
+
+        <div class="room-main">
+          <!-- SORU TOPLAMA -->
+          <div id="collect-view">
+            <h3>Soru Toplama Fazı</h3>
+            <p class="hint">
+              Herkes kendi sorularını ekleyebilir. Host hazır olunca quiz'i başlatır.
+            </p>
+            <div class="two-cols">
+              <div class="panel">
+                <h4>Soru Ekle</h4>
+
+                <label for="question-type">Soru tipi</label>
+                <select id="question-type">
+                  <option value="mcq">Çoktan seçmeli</option>
+                  <option value="tf">Doğru / Yanlış</option>
+                </select>
+
+                <label for="question-text">Soru metni</label>
+                <textarea id="question-text" rows="3" placeholder="Soru metnini yaz..."></textarea>
+
+                <div id="mcq-options">
+                  <label>Seçenekler</label>
+                  <input id="option-a" placeholder="A seçeneği" />
+                  <input id="option-b" placeholder="B seçeneği" />
+                  <input id="option-c" placeholder="C seçeneği (opsiyonel)" />
+                  <input id="option-d" placeholder="D seçeneği (opsiyonel)" />
+
+                  <label for="correct-index">Doğru seçenek</label>
+                  <select id="correct-index">
+                    <option value="0">A</option>
+                    <option value="1">B</option>
+                    <option value="2">C</option>
+                    <option value="3">D</option>
+                  </select>
+                </div>
+
+                <div id="tf-options" class="hidden">
+                  <p class="hint">
+                    Doğru / Yanlış soruları için seçenekler sabit: "Doğru", "Yanlış".
+                  </p>
+                  <label for="tf-correct">Doğru cevap</label>
+                  <select id="tf-correct">
+                    <option value="0">Doğru</option>
+                    <option value="1">Yanlış</option>
+                  </select>
+                </div>
+
+                <label for="question-time-limit">Süre (saniye, boş bırak = oda varsayılan)</label>
+                <input id="question-time-limit" type="number" min="5" max="120" />
+
+                <button id="add-question-btn">Soruyu Ekle</button>
+                <div class="error" id="question-error"></div>
+              </div>
+
+              <div class="panel">
+                <h4>Senin Soruların</h4>
+                <ul id="my-questions-list" class="question-list"></ul>
+
+                <h4>Tüm Oda Soruları</h4>
+                <ul id="room-questions-list" class="question-list small"></ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- QUIZ OYNAMA -->
+          <div id="play-view" class="hidden">
+            <h3 id="play-question-counter">Soru</h3>
+            <div id="timer-wrapper">
+              <div id="timer-bar">
+                <div id="timer-bar-fill"></div>
+              </div>
+              <div id="timer-display">--</div>
+            </div>
+
+            <div id="play-question-card" class="panel">
+              <div id="play-question-text" class="question-text"></div>
+              <div id="play-options" class="options-grid"></div>
+              <div id="answer-feedback" class="hint"></div>
+            </div>
+          </div>
+
+          <!-- SONUÇLAR -->
+          <div id="results-view" class="hidden">
+            <h3>Sonuçlar</h3>
+            <p class="hint">Doğru cevap sayısına göre sıralama.</p>
+            <div id="results-list"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
