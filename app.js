@@ -32,6 +32,9 @@ let questionEndTime = null;
 let hasAnsweredCurrent = false;
 let confettiTimeout = null;
 let confettiPlayed = false;
+let revealMode = false;
+let questionStartedAtMs = null;
+let resultsRendered = false;
 let currentLang = localStorage.getItem(LS_LANG) || "tr";
 let currentTheme = localStorage.getItem(LS_THEME) || "dark";
 let profileData = null;
@@ -644,8 +647,11 @@ function backToLobby() {
   questions = [];
   currentQuestion = null;
   questionEndTime = null;
+  questionStartedAtMs = null;
   hasAnsweredCurrent = false;
+  revealMode = false;
   confettiPlayed = false;
+  resultsRendered = false;
 
   lobbySection.classList.remove("hidden");
   roomSection.classList.add("hidden");
@@ -765,7 +771,12 @@ function attachRealtime(roomId) {
         renderRoom();
         renderPhaseViews();
         if (currentRoom.status === "playing") {
-          renderCurrentQuestion();
+          const ensureQuestions = questions.length
+            ? Promise.resolve()
+            : fetchQuestions(roomId);
+          Promise.resolve(ensureQuestions).then(() => {
+            renderCurrentQuestion();
+          });
         }
       }
     )
@@ -817,8 +828,10 @@ function renderQuestions() {
 
   const authorName = (id) => participants.find((p) => p.id === id)?.name || "?";
 
-  const showAll = currentRoom?.host_name === me?.name || currentRoom?.status !== "collecting";
-  const visibleRoomQuestions = showAll ? questions : myQuestions;
+  const isHost = currentRoom?.host_name === me?.name;
+  const status = currentRoom?.status;
+  const showAllRoomQuestions = status !== "collecting" || isHost;
+  const visibleRoomQuestions = showAllRoomQuestions ? questions : myQuestions;
 
   visibleRoomQuestions.forEach((q, idx) => {
     const timeInfo = `${q.time_limit_sec || currentRoom?.default_time_limit_sec || 20} sn`;
@@ -910,18 +923,23 @@ function renderPhaseViews() {
     playView.classList.add("hidden");
     resultsView.classList.add("hidden");
     stopTimer();
+    resultsRendered = false;
   } else if (currentRoom.status === "playing") {
     collectView.classList.add("hidden");
     playView.classList.remove("hidden");
     resultsView.classList.add("hidden");
+    resultsRendered = false;
     renderCurrentQuestion();
   } else if (currentRoom.status === "finished") {
     collectView.classList.add("hidden");
     playView.classList.add("hidden");
     resultsView.classList.remove("hidden");
     stopTimer();
-    loadAndRenderResults();
-    triggerConfetti();
+    if (!resultsRendered) {
+      loadAndRenderResults();
+      triggerConfetti();
+      resultsRendered = true;
+    }
   }
 }
 
@@ -1168,6 +1186,7 @@ function renderCurrentQuestion() {
   }
 
   hasAnsweredCurrent = false;
+  revealMode = false;
   answerFeedbackEl.textContent = "";
 
   const counterLabel = currentLang === "tr" ? "Soru" : "Question";
@@ -1185,10 +1204,10 @@ function renderCurrentQuestion() {
   });
 
   const limit = currentQuestion.time_limit_sec || currentRoom.default_time_limit_sec || 20;
-  const startedAt = currentRoom.current_question_started_at
+  questionStartedAtMs = currentRoom.current_question_started_at
     ? new Date(currentRoom.current_question_started_at).getTime()
     : Date.now();
-  questionEndTime = startedAt + limit * 1000;
+  questionEndTime = questionStartedAtMs + limit * 1000;
 
   startTimer(limit);
 }
@@ -1198,11 +1217,10 @@ function startTimer(limitSeconds) {
   stopTimer();
 
   function tick() {
-    if (!questionEndTime) return;
-    const now = Date.now();
+    if (!questionStartedAtMs) return;
     const total = limitSeconds;
-    const remainingMs = Math.max(0, questionEndTime - now);
-    const remainingSec = remainingMs / 1000;
+    const elapsed = (Date.now() - questionStartedAtMs) / 1000;
+    const remainingSec = Math.max(0, total - elapsed);
     timerDisplayEl.textContent = formatSeconds(remainingSec);
 
     const ratio = Math.max(0, Math.min(1, remainingSec / total));
@@ -1218,11 +1236,9 @@ function startTimer(limitSeconds) {
       timerBarFill.style.width = "0%";
       clearInterval(timerInterval);
       timerInterval = null;
-      if (!answerFeedbackEl.textContent) {
-        answerFeedbackEl.textContent =
-          currentLang === "tr"
-            ? "Süren doldu, host sonraki soruya geçene kadar bekliyoruz..."
-            : "Time is up, waiting for host to go to next question...";
+      if (!revealMode) {
+        revealMode = true;
+        revealCorrectAnswerForEveryone();
       }
     }
   }
@@ -1256,13 +1272,11 @@ async function handleAnswerClick(answerIndex, btnEl) {
   });
   btnEl.classList.add("selected");
 
-  const isCorrect = answerIndex === currentQuestion.correct_index;
-
   const { error } = await supabase.from("quiz_answers").insert({
     question_id: currentQuestion.id,
     participant_id: me.id,
     answer_index: answerIndex,
-    is_correct: isCorrect,
+    is_correct: answerIndex === currentQuestion.correct_index,
   });
 
   if (error) {
@@ -1271,10 +1285,26 @@ async function handleAnswerClick(answerIndex, btnEl) {
     return;
   }
 
-  const correctMsg = currentLang === "tr" ? "Doğru! 🎉" : "Correct! 🎉";
-  const incorrectMsg =
-    currentLang === "tr" ? "Yanlış, sıradaki soruya bakalım." : "Incorrect, let’s see the next one.";
-  answerFeedbackEl.textContent = isCorrect ? correctMsg : incorrectMsg;
+  answerFeedbackEl.textContent =
+    currentLang === "tr"
+      ? "Cevabın kaydedildi, doğru cevap açıklanıncaya kadar bekle."
+      : "Answer saved, wait for the reveal.";
+}
+
+function revealCorrectAnswerForEveryone() {
+  if (!currentQuestion) return;
+  const buttons = playOptionsEl.querySelectorAll(".option-btn");
+  buttons.forEach((btn, idx) => {
+    btn.classList.remove("selected");
+    btn.classList.toggle("correct", idx === currentQuestion.correct_index);
+    btn.classList.toggle("incorrect", idx !== currentQuestion.correct_index);
+    btn.disabled = true;
+  });
+  const letter = String.fromCharCode("A".charCodeAt(0) + (currentQuestion.correct_index || 0));
+  answerFeedbackEl.textContent =
+    currentLang === "tr"
+      ? `Doğru cevap: ${letter}`
+      : `Correct answer: ${letter}`;
 }
 
 // =============================================================
