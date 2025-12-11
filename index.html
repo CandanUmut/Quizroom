@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="tr">
+<html lang="tr" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <title>Ortak Quiz · Focus Arena</title>
@@ -10,11 +10,21 @@
   <div class="app">
     <div class="card">
       <header class="app-header">
-        <div>
-          <h1>Ortak Quiz · Focus Arena</h1>
-          <p class="subtitle">
+        <div class="branding">
+          <h1 data-i18n="title">Ortak Quiz · Focus Arena</h1>
+          <p class="subtitle" data-i18n="subtitle">
             Oda aç, herkes soru eklesin, sonra aynı anda quiz oynayıp sıralamayı gör.
           </p>
+        </div>
+        <div class="header-actions">
+          <div id="profile-chip" class="profile-chip" role="button"></div>
+          <div class="toggle-row">
+            <button id="theme-toggle" class="chip-btn" type="button">🌙</button>
+            <div class="lang-switch">
+              <button id="lang-tr" class="chip-btn" type="button">🇹🇷</button>
+              <button id="lang-en" class="chip-btn" type="button">🇬🇧</button>
+            </div>
+          </div>
         </div>
         <div id="rejoin-notice" class="hint hidden"></div>
       </header>
@@ -23,27 +33,27 @@
       <section id="lobby-section">
         <div class="two-cols">
           <div class="panel">
-            <h2>Yeni Oda Oluştur</h2>
-            <label for="create-name">İsmin</label>
+            <h2 data-i18n="createTitle">Yeni Oda Oluştur</h2>
+            <label for="create-name" data-i18n="labelName">İsmin</label>
             <input id="create-name" placeholder="Umut, Nova..." />
 
-            <label for="create-time-limit">Soru süresi (saniye)</label>
+            <label for="create-time-limit" data-i18n="labelTime">Soru süresi (saniye)</label>
             <input id="create-time-limit" type="number" min="5" max="120" value="20" />
 
-            <button id="create-room-btn">Oda Oluştur</button>
+            <button id="create-room-btn" data-i18n="btnCreate">Oda Oluştur</button>
             <div class="error" id="create-error"></div>
           </div>
 
           <div class="panel">
-            <h2>Koda Göre Katıl</h2>
-            <label for="join-name">İsmin</label>
+            <h2 data-i18n="joinTitle">Koda Göre Katıl</h2>
+            <label for="join-name" data-i18n="labelName">İsmin</label>
             <input id="join-name" placeholder="İsmin" />
 
-            <label for="join-code">Oda Kodu</label>
+            <label for="join-code" data-i18n="labelCode">Oda Kodu</label>
             <input id="join-code" placeholder="Örn: ABC123" />
 
-            <button class="secondary" id="join-room-btn">Odaya Katıl</button>
-            <div class="hint">
+            <button class="secondary" id="join-room-btn" data-i18n="btnJoin">Odaya Katıl</button>
+            <div class="hint" data-i18n="joinHint">
               Host sana oda kodunu veya linki paylaşabilir.
             </div>
             <div class="error" id="join-error"></div>
@@ -55,27 +65,30 @@
       <section id="room-section" class="hidden">
         <div class="room-header">
           <div class="room-info-box">
-            <h2 id="room-title">Oda</h2>
-            <p><span class="label">Kod:</span> <span id="room-code">-</span></p>
-            <p><span class="label">Host:</span> <span id="room-host">-</span></p>
-            <p><span class="label">Durum:</span> <span id="room-status">-</span></p>
-            <p><span class="label">Katılımcı:</span> <span id="participant-count">0</span></p>
-            <p><span class="label">Toplam soru:</span> <span id="room-question-count">0</span></p>
+            <h2 id="room-title" data-i18n="roomHeading">Oda</h2>
+            <p><span class="label" data-i18n="code">Kod:</span> <span id="room-code">-</span></p>
+            <p><span class="label" data-i18n="host">Host:</span> <span id="room-host">-</span></p>
+            <p><span class="label" data-i18n="status">Durum:</span> <span id="room-status">-</span></p>
+            <p><span class="label" data-i18n="participants">Katılımcı:</span> <span id="participant-count">0</span></p>
+            <p><span class="label" data-i18n="totalQuestions">Toplam soru:</span> <span id="room-question-count">0</span></p>
             <p>
-              <span class="label">Link:</span>
+              <span class="label" data-i18n="link">Link:</span>
               <a id="room-link" href="#" target="_blank" rel="noreferrer"></a>
             </p>
           </div>
 
           <div class="room-info-box">
-            <h3>Katılımcılar</h3>
+            <div class="list-header">
+              <h3 data-i18n="participantsList">Katılımcılar</h3>
+              <div id="player-stats-chip" class="pill"></div>
+            </div>
             <ul id="participants-list" class="participants"></ul>
           </div>
         </div>
 
         <div class="room-controls">
           <div id="host-controls" class="host-controls"></div>
-          <button id="back-to-lobby-btn" class="secondary small">Lobiye Dön</button>
+          <button id="back-to-lobby-btn" class="secondary small" data-i18n="backLobby">Lobiye Dön</button>
         </div>
 
         <div class="room-main">
@@ -83,8 +96,8 @@
           <div id="collect-view">
             <div class="collect-header">
               <div>
-                <h3>Soru Toplama Fazı</h3>
-                <p class="hint">
+                <h3 data-i18n="collectPhase">Soru Toplama Fazı</h3>
+                <p class="hint" data-i18n="collectHint">
                   Herkes kendi sorularını ekleyebilir. Host hazır olunca quiz'i başlatır.
                 </p>
               </div>
@@ -92,21 +105,21 @@
             </div>
             <div class="two-cols">
               <div class="panel question-form">
-                <h4>Soru Ekle</h4>
+                <h4 data-i18n="addQuestion">Soru Ekle</h4>
 
                 <div class="question-type-row">
-                  <label for="question-type">Soru tipi</label>
+                  <label for="question-type" data-i18n="questionType">Soru tipi</label>
                   <select id="question-type">
-                    <option value="mcq">Çoktan seçmeli</option>
-                    <option value="tf">Doğru / Yanlış</option>
+                    <option value="mcq" data-i18n="typeMcq">Çoktan seçmeli</option>
+                    <option value="tf" data-i18n="typeTf">Doğru / Yanlış</option>
                   </select>
                 </div>
 
-                <label for="question-text">Soru metni</label>
+                <label for="question-text" data-i18n="questionText">Soru metni</label>
                 <textarea id="question-text" rows="3" placeholder="Soru metnini yaz..."></textarea>
 
                 <div id="mcq-options" class="options-stack">
-                  <label>Seçenekler</label>
+                  <label data-i18n="options">Seçenekler</label>
                   <div class="option-row">
                     <span class="option-label">A</span>
                     <input id="option-a" placeholder="A seçeneği" />
@@ -124,7 +137,7 @@
                     <input id="option-d" placeholder="D seçeneği (opsiyonel)" />
                   </div>
 
-                  <label for="correct-index">Doğru seçenek</label>
+                  <label for="correct-index" data-i18n="correctOption">Doğru seçenek</label>
                   <select id="correct-index">
                     <option value="0">A</option>
                     <option value="1">B</option>
@@ -134,33 +147,36 @@
                 </div>
 
                 <div id="tf-options" class="hidden tf-box">
-                  <p class="hint">
+                  <p class="hint" data-i18n="tfHint">
                     Doğru / Yanlış soruları için seçenekler sabit: "Doğru", "Yanlış".
                   </p>
-                  <label for="tf-correct">Doğru cevap</label>
+                  <label for="tf-correct" data-i18n="correctAnswer">Doğru cevap</label>
                   <select id="tf-correct">
                     <option value="0">Doğru</option>
                     <option value="1">Yanlış</option>
                   </select>
                 </div>
 
-                <label for="question-time-limit">Süre (saniye, boş bırak = oda varsayılan)</label>
+                <label for="question-time-limit" data-i18n="questionTime">Süre (saniye, boş bırak = oda varsayılan)</label>
                 <input id="question-time-limit" type="number" min="5" max="120" />
 
-                <button id="add-question-btn">Soruyu Ekle</button>
+                <div class="actions-row">
+                  <button id="add-question-btn" data-i18n="btnSaveQuestion">Soruyu Ekle</button>
+                  <button id="new-question-btn" class="secondary" type="button" data-i18n="btnNewQuestion">+ Yeni</button>
+                </div>
                 <div class="error" id="question-error"></div>
               </div>
 
               <div class="panel question-lists">
                 <div class="list-header">
-                  <h4>Senin Soruların</h4>
-                  <span class="hint">Sadece başlayana kadar silebilirsin</span>
+                  <h4 data-i18n="myQuestions">Senin Soruların</h4>
+                  <span class="hint" data-i18n="myQuestionsHint">Sadece başlayana kadar silebilirsin</span>
                 </div>
                 <ul id="my-questions-list" class="question-list"></ul>
 
                 <div class="list-header">
-                  <h4>Tüm Oda Soruları</h4>
-                  <span class="hint">Host en az 1 soru sonrası başlatabilir</span>
+                  <h4 data-i18n="roomQuestions">Tüm Oda Soruları</h4>
+                  <span class="hint" data-i18n="roomQuestionsHint">Host en az 1 soru sonrası başlatabilir</span>
                 </div>
                 <ul id="room-questions-list" class="question-list small"></ul>
               </div>
@@ -190,15 +206,36 @@
           <!-- SONUÇLAR -->
           <div id="results-view" class="hidden">
             <div class="results-header">
-              <h3>Sonuçlar</h3>
+              <h3 data-i18n="results">Sonuçlar</h3>
               <div class="status-pill" id="results-status-pill">Round finished</div>
             </div>
-            <p class="hint">Doğru cevap sayısına göre sıralama.</p>
+            <p class="hint" data-i18n="resultsHint">Doğru cevap sayısına göre sıralama.</p>
             <div id="results-summary"></div>
             <div id="results-list"></div>
           </div>
+
+          <div class="panel" id="stats-panel">
+            <div class="list-header">
+              <h4 data-i18n="statsTitle">İstatistikler & Rozetler</h4>
+              <span class="hint" data-i18n="statsHint">Güncel oturumdan bağımsız olarak saklanır.</span>
+            </div>
+            <div id="stats-grid" class="stats-grid"></div>
+            <div id="badge-list" class="badge-list"></div>
+          </div>
         </div>
       </section>
+    </div>
+  </div>
+
+  <div id="avatar-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 data-i18n="avatarTitle">Avatar Seç</h3>
+        <button id="close-avatar" class="secondary small" type="button">×</button>
+      </div>
+      <div class="avatar-grid" id="avatar-options"></div>
+      <div class="color-grid" id="color-options"></div>
+      <button id="save-avatar" type="button" data-i18n="saveAvatar">Kaydet</button>
     </div>
   </div>
 
