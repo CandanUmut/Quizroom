@@ -16,6 +16,7 @@
             Oda aç, herkes soru eklesin, sonra aynı anda quiz oynayıp sıralamayı gör.
           </p>
         </div>
+        <div id="rejoin-notice" class="hint hidden"></div>
       </header>
 
       <!-- LOBI -->
@@ -58,6 +59,7 @@
             <p><span class="label">Kod:</span> <span id="room-code">-</span></p>
             <p><span class="label">Host:</span> <span id="room-host">-</span></p>
             <p><span class="label">Durum:</span> <span id="room-status">-</span></p>
+            <p><span class="label">Katılımcı:</span> <span id="participant-count">0</span></p>
             <p><span class="label">Toplam soru:</span> <span id="room-question-count">0</span></p>
             <p>
               <span class="label">Link:</span>
@@ -79,29 +81,48 @@
         <div class="room-main">
           <!-- SORU TOPLAMA -->
           <div id="collect-view">
-            <h3>Soru Toplama Fazı</h3>
-            <p class="hint">
-              Herkes kendi sorularını ekleyebilir. Host hazır olunca quiz'i başlatır.
-            </p>
+            <div class="collect-header">
+              <div>
+                <h3>Soru Toplama Fazı</h3>
+                <p class="hint">
+                  Herkes kendi sorularını ekleyebilir. Host hazır olunca quiz'i başlatır.
+                </p>
+              </div>
+              <div class="status-pill" id="collect-status-pill">Collecting questions</div>
+            </div>
             <div class="two-cols">
-              <div class="panel">
+              <div class="panel question-form">
                 <h4>Soru Ekle</h4>
 
-                <label for="question-type">Soru tipi</label>
-                <select id="question-type">
-                  <option value="mcq">Çoktan seçmeli</option>
-                  <option value="tf">Doğru / Yanlış</option>
-                </select>
+                <div class="question-type-row">
+                  <label for="question-type">Soru tipi</label>
+                  <select id="question-type">
+                    <option value="mcq">Çoktan seçmeli</option>
+                    <option value="tf">Doğru / Yanlış</option>
+                  </select>
+                </div>
 
                 <label for="question-text">Soru metni</label>
                 <textarea id="question-text" rows="3" placeholder="Soru metnini yaz..."></textarea>
 
-                <div id="mcq-options">
+                <div id="mcq-options" class="options-stack">
                   <label>Seçenekler</label>
-                  <input id="option-a" placeholder="A seçeneği" />
-                  <input id="option-b" placeholder="B seçeneği" />
-                  <input id="option-c" placeholder="C seçeneği (opsiyonel)" />
-                  <input id="option-d" placeholder="D seçeneği (opsiyonel)" />
+                  <div class="option-row">
+                    <span class="option-label">A</span>
+                    <input id="option-a" placeholder="A seçeneği" />
+                  </div>
+                  <div class="option-row">
+                    <span class="option-label">B</span>
+                    <input id="option-b" placeholder="B seçeneği" />
+                  </div>
+                  <div class="option-row">
+                    <span class="option-label">C</span>
+                    <input id="option-c" placeholder="C seçeneği (opsiyonel)" />
+                  </div>
+                  <div class="option-row">
+                    <span class="option-label">D</span>
+                    <input id="option-d" placeholder="D seçeneği (opsiyonel)" />
+                  </div>
 
                   <label for="correct-index">Doğru seçenek</label>
                   <select id="correct-index">
@@ -112,7 +133,7 @@
                   </select>
                 </div>
 
-                <div id="tf-options" class="hidden">
+                <div id="tf-options" class="hidden tf-box">
                   <p class="hint">
                     Doğru / Yanlış soruları için seçenekler sabit: "Doğru", "Yanlış".
                   </p>
@@ -130,11 +151,17 @@
                 <div class="error" id="question-error"></div>
               </div>
 
-              <div class="panel">
-                <h4>Senin Soruların</h4>
+              <div class="panel question-lists">
+                <div class="list-header">
+                  <h4>Senin Soruların</h4>
+                  <span class="hint">Sadece başlayana kadar silebilirsin</span>
+                </div>
                 <ul id="my-questions-list" class="question-list"></ul>
 
-                <h4>Tüm Oda Soruları</h4>
+                <div class="list-header">
+                  <h4>Tüm Oda Soruları</h4>
+                  <span class="hint">Host en az 1 soru sonrası başlatabilir</span>
+                </div>
                 <ul id="room-questions-list" class="question-list small"></ul>
               </div>
             </div>
@@ -142,7 +169,10 @@
 
           <!-- QUIZ OYNAMA -->
           <div id="play-view" class="hidden">
-            <h3 id="play-question-counter">Soru</h3>
+            <div class="play-top">
+              <h3 id="play-question-counter">Soru</h3>
+              <div class="status-pill" id="play-status-pill">Quiz in progress</div>
+            </div>
             <div id="timer-wrapper">
               <div id="timer-bar">
                 <div id="timer-bar-fill"></div>
@@ -159,8 +189,12 @@
 
           <!-- SONUÇLAR -->
           <div id="results-view" class="hidden">
-            <h3>Sonuçlar</h3>
+            <div class="results-header">
+              <h3>Sonuçlar</h3>
+              <div class="status-pill" id="results-status-pill">Round finished</div>
+            </div>
             <p class="hint">Doğru cevap sayısına göre sıralama.</p>
+            <div id="results-summary"></div>
             <div id="results-list"></div>
           </div>
         </div>
@@ -168,6 +202,7 @@
     </div>
   </div>
 
+  <div id="confetti-container" aria-hidden="true"></div>
   <script type="module" src="app.js"></script>
 </body>
 </html>
