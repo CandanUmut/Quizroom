@@ -11,6 +11,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const LS_CLIENT_ID = "quiz_client_id_v1";
 const LS_LAST_ROOM = "quiz_last_room_slug";
 const LS_LAST_NAME = "quiz_last_participant_name";
+const LS_LANG = "quiz_lang";
+const LS_THEME = "quiz_theme";
+const LS_PROFILE = "quiz_profile";
+const LS_STATS = "quiz_stats";
 
 // =============================================================
 // Global state & helpers
@@ -20,6 +24,7 @@ let currentRoom = null;
 let me = null; // quiz_participants row
 let participants = [];
 let questions = [];
+let myQuestions = [];
 let roomChannel = null;
 let timerInterval = null;
 let currentQuestion = null;
@@ -27,6 +32,115 @@ let questionEndTime = null;
 let hasAnsweredCurrent = false;
 let confettiTimeout = null;
 let confettiPlayed = false;
+let currentLang = localStorage.getItem(LS_LANG) || "tr";
+let currentTheme = localStorage.getItem(LS_THEME) || "dark";
+let profileData = null;
+let statsData = null;
+
+const textMap = {
+  tr: {
+    title: "Ortak Quiz · Focus Arena",
+    subtitle:
+      "Oda aç, herkes soru eklesin, sonra aynı anda quiz oynayıp sıralamayı gör.",
+    createTitle: "Yeni Oda Oluştur",
+    joinTitle: "Koda Göre Katıl",
+    labelName: "İsmin",
+    labelTime: "Soru süresi (saniye)",
+    labelCode: "Oda Kodu",
+    btnCreate: "Oda Oluştur",
+    btnJoin: "Odaya Katıl",
+    joinHint: "Host sana oda kodunu veya linki paylaşabilir.",
+    roomHeading: "Oda",
+    code: "Kod:",
+    host: "Host:",
+    status: "Durum:",
+    participants: "Katılımcı:",
+    totalQuestions: "Toplam soru:",
+    link: "Link:",
+    participantsList: "Katılımcılar",
+    backLobby: "Lobiye Dön",
+    collectPhase: "Soru Toplama Fazı",
+    collectHint:
+      "Herkes kendi sorularını ekleyebilir. Host hazır olunca quiz'i başlatır.",
+    addQuestion: "Soru Ekle",
+    questionType: "Soru tipi",
+    typeMcq: "Çoktan seçmeli",
+    typeTf: "Doğru / Yanlış",
+    questionText: "Soru metni",
+    options: "Seçenekler",
+    correctOption: "Doğru seçenek",
+    tfHint: "Doğru / Yanlış soruları için seçenekler sabit: 'Doğru', 'Yanlış'.",
+    correctAnswer: "Doğru cevap",
+    questionTime: "Süre (saniye, boş bırak = oda varsayılan)",
+    btnSaveQuestion: "Soruyu Ekle",
+    btnNewQuestion: "+ Yeni",
+    myQuestions: "Senin Soruların",
+    myQuestionsHint: "Sadece başlayana kadar silebilirsin",
+    roomQuestions: "Tüm Oda Soruları",
+    roomQuestionsHint: "Host en az 1 soru sonrası başlatabilir",
+    results: "Sonuçlar",
+    resultsHint: "Doğru cevap sayısına göre sıralama.",
+    statsTitle: "İstatistikler & Rozetler",
+    statsHint: "Güncel oturumdan bağımsız olarak saklanır.",
+    avatarTitle: "Avatar Seç",
+    saveAvatar: "Kaydet",
+    statusCollecting: "Soru toplanıyor",
+    statusPlaying: "Quiz oynanıyor",
+    statusFinished: "Tur tamamlandı",
+  },
+  en: {
+    title: "Collaborative Quiz · Focus Arena",
+    subtitle: "Open a room, let everyone add questions, then play together.",
+    createTitle: "Create Room",
+    joinTitle: "Join by Code",
+    labelName: "Your name",
+    labelTime: "Question timer (sec)",
+    labelCode: "Room Code",
+    btnCreate: "Create room",
+    btnJoin: "Join room",
+    joinHint: "Host can share the room code or link.",
+    roomHeading: "Room",
+    code: "Code:",
+    host: "Host:",
+    status: "Status:",
+    participants: "Participants:",
+    totalQuestions: "Total questions:",
+    link: "Link:",
+    participantsList: "Players",
+    backLobby: "Back to lobby",
+    collectPhase: "Question collection",
+    collectHint: "Everyone adds their own questions. Host starts when ready.",
+    addQuestion: "Add question",
+    questionType: "Question type",
+    typeMcq: "Multiple choice",
+    typeTf: "True / False",
+    questionText: "Question text",
+    options: "Options",
+    correctOption: "Correct option",
+    tfHint: "Options are fixed for True/False questions.",
+    correctAnswer: "Correct answer",
+    questionTime: "Time (seconds, empty = room default)",
+    btnSaveQuestion: "Save question",
+    btnNewQuestion: "+ Add new",
+    myQuestions: "Your questions",
+    myQuestionsHint: "You can delete them until the quiz starts",
+    roomQuestions: "Room questions",
+    roomQuestionsHint: "Host can start after at least one question",
+    results: "Results",
+    resultsHint: "Ranking by number of correct answers.",
+    statsTitle: "Stats & Badges",
+    statsHint: "Stored beyond the current session.",
+    avatarTitle: "Choose avatar",
+    saveAvatar: "Save",
+    statusCollecting: "Collecting questions",
+    statusPlaying: "Quiz in progress",
+    statusFinished: "Round finished",
+  },
+};
+
+function t(key) {
+  return textMap[currentLang]?.[key] || key;
+}
 
 function ensureClientId() {
   let id = localStorage.getItem(LS_CLIENT_ID);
@@ -58,10 +172,220 @@ function shuffle(arr) {
 }
 
 function humanizeStatus(status) {
-  if (status === "collecting") return "Collecting questions";
-  if (status === "playing") return "Quiz in progress";
-  if (status === "finished") return "Round finished";
+  if (status === "collecting") return t("statusCollecting");
+  if (status === "playing") return t("statusPlaying");
+  if (status === "finished") return t("statusFinished");
   return status || "-";
+}
+
+function changeLanguage(lang) {
+  currentLang = lang;
+  localStorage.setItem(LS_LANG, lang);
+  applyLanguage();
+  renderRoom();
+}
+
+function applyLanguage() {
+  document.documentElement.lang = currentLang;
+  const elements = document.querySelectorAll("[data-i18n]");
+  elements.forEach((el) => {
+    const key = el.getAttribute("data-i18n");
+    const text = t(key);
+    if (text) el.textContent = text;
+  });
+  createNameInput.placeholder = currentLang === "tr" ? "Umut, Nova..." : "Jane, Nova...";
+  joinNameInput.placeholder = currentLang === "tr" ? "İsmin" : "Your name";
+  joinCodeInput.placeholder = currentLang === "tr" ? "Örn: ABC123" : "Ex: ABC123";
+}
+
+function toggleTheme() {
+  currentTheme = currentTheme === "dark" ? "light" : "dark";
+  localStorage.setItem(LS_THEME, currentTheme);
+  applyTheme();
+}
+
+function applyTheme() {
+  document.documentElement.setAttribute("data-theme", currentTheme);
+  themeToggle.textContent = currentTheme === "dark" ? "🌙" : "☀️";
+}
+
+function ensureProfile() {
+  const stored = localStorage.getItem(LS_PROFILE);
+  if (stored) {
+    profileData = JSON.parse(stored);
+  }
+  if (!profileData) {
+    profileData = {
+      display_name: localStorage.getItem(LS_LAST_NAME) || "Player",
+      avatar_emoji: "🎯",
+      avatar_color: "#38bdf8",
+    };
+    localStorage.setItem(LS_PROFILE, JSON.stringify(profileData));
+  }
+  renderProfileChip();
+}
+
+function renderProfileChip() {
+  if (!profileChip) return;
+  profileChip.innerHTML = "";
+  const circle = document.createElement("span");
+  circle.className = "avatar-circle";
+  circle.style.background = profileData?.avatar_color || "#38bdf8";
+  circle.textContent = profileData?.avatar_emoji || "🙂";
+  const labelBox = document.createElement("div");
+  labelBox.style.display = "flex";
+  labelBox.style.flexDirection = "column";
+  labelBox.style.alignItems = "flex-start";
+  const nameEl = document.createElement("strong");
+  nameEl.textContent = profileData?.display_name || "Player";
+  const hint = document.createElement("small");
+  hint.textContent = currentLang === "tr" ? "Avatarı düzenle" : "Edit avatar";
+  labelBox.appendChild(nameEl);
+  labelBox.appendChild(hint);
+  profileChip.appendChild(labelBox);
+  profileChip.appendChild(circle);
+}
+
+function setupAvatarOptions() {
+  const emojis = ["🎓", "🤓", "🚀", "🧠", "🔥", "🌟", "🎯", "🏆"];
+  const colors = ["#38bdf8", "#22c55e", "#f59e0b", "#a855f7", "#ef4444", "#f97316"];
+
+  avatarOptionsEl.innerHTML = "";
+  colorOptionsEl.innerHTML = "";
+  emojis.forEach((em) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "avatar-option";
+    btn.textContent = em;
+    if (profileData?.avatar_emoji === em) btn.classList.add("selected");
+    btn.onclick = () => {
+      avatarOptionsEl.querySelectorAll(".avatar-option").forEach((el) => el.classList.remove("selected"));
+      btn.classList.add("selected");
+      profileData.avatar_emoji = em;
+    };
+    avatarOptionsEl.appendChild(btn);
+  });
+
+  colors.forEach((color) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "color-option";
+    btn.style.background = color;
+    if (profileData?.avatar_color === color) btn.classList.add("selected");
+    btn.onclick = () => {
+      colorOptionsEl.querySelectorAll(".color-option").forEach((el) => el.classList.remove("selected"));
+      btn.classList.add("selected");
+      profileData.avatar_color = color;
+    };
+    colorOptionsEl.appendChild(btn);
+  });
+}
+
+function saveAvatarSelection() {
+  localStorage.setItem(LS_PROFILE, JSON.stringify(profileData));
+  renderProfileChip();
+  avatarModal.classList.add("hidden");
+  // TODO: persist avatar to backend profile table if available.
+}
+
+function renderAvatarChip(playerRow) {
+  if (!playerRow) return null;
+  // TODO: load other players' avatars from backend once columns exist
+  if (me && playerRow.id === me.id) {
+    const span = document.createElement("span");
+    span.className = "avatar-circle";
+    span.style.background = profileData?.avatar_color || "#38bdf8";
+    span.textContent = profileData?.avatar_emoji || "🙂";
+    return span;
+  }
+  return null;
+}
+
+function ensureStats() {
+  const stored = localStorage.getItem(LS_STATS);
+  if (stored) {
+    statsData = JSON.parse(stored);
+  }
+  if (!statsData) {
+    statsData = {
+      total_quizzes: 0,
+      total_answered: 0,
+      total_correct: 0,
+      streak_days: 0,
+      longest_streak: 0,
+      last_play_date: null,
+    };
+  }
+  localStorage.setItem(LS_STATS, JSON.stringify(statsData));
+}
+
+function renderStats() {
+  if (!statsGridEl) return;
+  statsGridEl.innerHTML = "";
+  const items = [
+    { label: currentLang === "tr" ? "Toplam Quiz" : "Total quizzes", value: statsData?.total_quizzes || 0 },
+    { label: currentLang === "tr" ? "Cevaplanan" : "Answered", value: statsData?.total_answered || 0 },
+    { label: currentLang === "tr" ? "Doğru" : "Correct", value: statsData?.total_correct || 0 },
+    {
+      label: currentLang === "tr" ? "Seri" : "Streak",
+      value: `${statsData?.streak_days || 0} / ${statsData?.longest_streak || 0}`,
+    },
+  ];
+  items.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "stat-card";
+    card.innerHTML = `<div class="label">${item.label}</div><div style="font-size:1.4rem;font-weight:700;">${item.value}</div>`;
+    statsGridEl.appendChild(card);
+  });
+
+  renderBadges();
+
+  if (playerStatsChip) {
+    playerStatsChip.textContent = `${t("participantsList")}: ${participants.length} · ${currentLang === "tr" ? "Seri" : "Streak"} ${statsData?.streak_days || 0}`;
+  }
+}
+
+function renderBadges() {
+  badgeListEl.innerHTML = "";
+  const badges = [];
+  if ((statsData?.total_quizzes || 0) > 0) badges.push({ emoji: "🥇", label: currentLang === "tr" ? "İlk quiz" : "First quiz" });
+  if ((statsData?.total_answered || 0) >= 1) badges.push({ emoji: "🥈", label: currentLang === "tr" ? "İlk soru" : "First question" });
+  if ((statsData?.total_correct || 0) >= 2) badges.push({ emoji: "🎯", label: currentLang === "tr" ? "2+ doğru" : "2+ correct" });
+  if ((statsData?.streak_days || 0) >= 3) badges.push({ emoji: "🔥", label: currentLang === "tr" ? "3 gün serisi" : "3-day streak" });
+  if ((statsData?.streak_days || 0) >= 7) badges.push({ emoji: "🌟", label: currentLang === "tr" ? "7 gün serisi" : "7-day streak" });
+
+  badges.forEach((b) => {
+    const chip = document.createElement("div");
+    chip.className = "badge-chip";
+    chip.textContent = `${b.emoji} ${b.label}`;
+    badgeListEl.appendChild(chip);
+  });
+}
+
+function updateStatsAfterQuiz(correctCount, totalQuestions) {
+  ensureStats();
+  statsData.total_quizzes += 1;
+  statsData.total_answered += totalQuestions;
+  statsData.total_correct += correctCount;
+  const today = new Date().toISOString().slice(0, 10);
+  if (statsData.last_play_date) {
+    const diff =
+      (new Date(today).getTime() - new Date(statsData.last_play_date).getTime()) /
+      (1000 * 60 * 60 * 24);
+    if (diff === 1) {
+      statsData.streak_days += 1;
+    } else if (diff === 0) {
+      // keep streak
+    } else {
+      statsData.streak_days = 1;
+    }
+  } else {
+    statsData.streak_days = 1;
+  }
+  statsData.longest_streak = Math.max(statsData.longest_streak || 0, statsData.streak_days);
+  statsData.last_play_date = today;
+  localStorage.setItem(LS_STATS, JSON.stringify(statsData));
+  renderStats();
 }
 
 function logError(context, error) {
@@ -97,6 +421,11 @@ const roomLinkEl = document.getElementById("room-link");
 const participantsListEl = document.getElementById("participants-list");
 const hostControlsEl = document.getElementById("host-controls");
 const backToLobbyBtn = document.getElementById("back-to-lobby-btn");
+const profileChip = document.getElementById("profile-chip");
+const themeToggle = document.getElementById("theme-toggle");
+const langTrBtn = document.getElementById("lang-tr");
+const langEnBtn = document.getElementById("lang-en");
+const playerStatsChip = document.getElementById("player-stats-chip");
 
 const collectView = document.getElementById("collect-view");
 const playView = document.getElementById("play-view");
@@ -133,6 +462,13 @@ const answerFeedbackEl = document.getElementById("answer-feedback");
 const resultsSummaryEl = document.getElementById("results-summary");
 const resultsListEl = document.getElementById("results-list");
 const confettiContainer = document.getElementById("confetti-container");
+const statsGridEl = document.getElementById("stats-grid");
+const badgeListEl = document.getElementById("badge-list");
+const avatarModal = document.getElementById("avatar-modal");
+const avatarOptionsEl = document.getElementById("avatar-options");
+const colorOptionsEl = document.getElementById("color-options");
+const closeAvatarBtn = document.getElementById("close-avatar");
+const saveAvatarBtn = document.getElementById("save-avatar");
 
 // =============================================================
 // Event listeners
@@ -141,6 +477,14 @@ createRoomBtn.addEventListener("click", createRoom);
 joinRoomBtn.addEventListener("click", joinRoom);
 backToLobbyBtn.addEventListener("click", backToLobby);
 addQuestionBtn.addEventListener("click", addQuestion);
+document.getElementById("new-question-btn").addEventListener("click", () => {
+  questionTextInput.value = "";
+  optionAInput.value = "";
+  optionBInput.value = "";
+  optionCInput.value = "";
+  optionDInput.value = "";
+  questionTimeLimitInput.value = "";
+});
 
 questionTypeSelect.addEventListener("change", () => {
   const type = questionTypeSelect.value;
@@ -152,6 +496,17 @@ questionTypeSelect.addEventListener("change", () => {
     tfOptionsBox.classList.remove("hidden");
   }
 });
+
+profileChip.addEventListener("click", () => {
+  avatarModal.classList.remove("hidden");
+});
+closeAvatarBtn.addEventListener("click", () => {
+  avatarModal.classList.add("hidden");
+});
+saveAvatarBtn.addEventListener("click", saveAvatarSelection);
+themeToggle.addEventListener("click", toggleTheme);
+langTrBtn.addEventListener("click", () => changeLanguage("tr"));
+langEnBtn.addEventListener("click", () => changeLanguage("en"));
 
 // =============================================================
 // Supabase helpers
@@ -198,7 +553,18 @@ async function fetchQuestions(roomId) {
     return;
   }
   questions = data || [];
+  syncMyQuestions();
   renderQuestions();
+}
+
+function syncMyQuestions() {
+  if (!me) {
+    myQuestions = [];
+    return;
+  }
+  myQuestions = (questions || []).filter(
+    (q) => q.author_participant_id === me.id
+  );
 }
 
 async function findExistingParticipant(roomId) {
@@ -225,6 +591,11 @@ function enterRoom(room, participant) {
   me = participant;
   localStorage.setItem(LS_LAST_ROOM, room.slug);
   if (participant?.name) localStorage.setItem(LS_LAST_NAME, participant.name);
+  if (profileData) {
+    profileData.display_name = participant?.name || profileData.display_name;
+    localStorage.setItem(LS_PROFILE, JSON.stringify(profileData));
+    renderProfileChip();
+  }
 
   lobbySection.classList.add("hidden");
   roomSection.classList.remove("hidden");
@@ -402,7 +773,11 @@ function renderParticipants() {
     const isHost = currentRoom && currentRoom.host_name === p.name;
     if (me && p.id === me.id) li.classList.add("participant-me");
     if (isHost) li.classList.add("participant-host");
-    li.textContent = `${p.name}${isHost ? " · Host" : ""}${me && p.id === me.id ? " · Sen" : ""}`;
+    const avatar = renderAvatarChip(p);
+    if (avatar) li.appendChild(avatar);
+    const label = document.createElement("span");
+    label.textContent = `${p.name}${isHost ? " · Host" : ""}${me && p.id === me.id ? " · Sen" : ""}`;
+    li.appendChild(label);
     participantsListEl.appendChild(li);
   });
 }
@@ -414,7 +789,10 @@ function renderQuestions() {
 
   const authorName = (id) => participants.find((p) => p.id === id)?.name || "?";
 
-  questions.forEach((q, idx) => {
+  const showAll = currentRoom?.host_name === me?.name || currentRoom?.status !== "collecting";
+  const visibleRoomQuestions = showAll ? questions : myQuestions;
+
+  visibleRoomQuestions.forEach((q, idx) => {
     const timeInfo = `${q.time_limit_sec || currentRoom?.default_time_limit_sec || 20} sn`;
     const metaText = `${q.question_type?.toUpperCase() || "?"} · ${timeInfo}`;
 
@@ -424,26 +802,31 @@ function renderQuestions() {
     metaBlock.innerHTML = `<strong>${idx + 1}.</strong> ${q.text || "(boş soru)"}<span class="meta">${metaText} · ${authorName(q.author_participant_id)}</span>`;
     liRoom.appendChild(metaBlock);
     roomQuestionsListEl.appendChild(liRoom);
+  });
 
-    if (me && q.author_participant_id === me.id) {
-      const liMine = document.createElement("li");
-      liMine.appendChild(metaBlock.cloneNode(true));
-      if (currentRoom?.status === "collecting") {
-        const btn = document.createElement("button");
-        btn.className = "delete-btn small";
-        btn.textContent = "Sil";
-        btn.onclick = () => deleteQuestion(q.id);
-        liMine.appendChild(btn);
-      }
-      myQuestionsListEl.appendChild(liMine);
+  myQuestions.forEach((q, idx) => {
+    const timeInfo = `${q.time_limit_sec || currentRoom?.default_time_limit_sec || 20} sn`;
+    const metaText = `${q.question_type?.toUpperCase() || "?"} · ${timeInfo}`;
+    const liMine = document.createElement("li");
+    const metaBlock = document.createElement("div");
+    metaBlock.className = "question-meta-block";
+    metaBlock.innerHTML = `<strong>${idx + 1}.</strong> ${q.text || "(boş soru)"}<span class="meta">${metaText}</span>`;
+    liMine.appendChild(metaBlock);
+    if (currentRoom?.status === "collecting") {
+      const btn = document.createElement("button");
+      btn.className = "delete-btn small";
+      btn.textContent = "Sil";
+      btn.onclick = () => deleteQuestion(q.id);
+      liMine.appendChild(btn);
     }
+    myQuestionsListEl.appendChild(liMine);
   });
 }
 
 function renderRoom() {
   if (!currentRoom) return;
 
-  roomTitleEl.textContent = "Oda";
+  roomTitleEl.textContent = t("roomHeading");
   roomCodeEl.textContent = currentRoom.slug;
   roomHostEl.textContent = currentRoom.host_name || "-";
   roomStatusEl.textContent = humanizeStatus(currentRoom.status);
@@ -601,7 +984,11 @@ async function deleteQuestion(questionId) {
     .eq("author_participant_id", me.id);
   if (error) {
     alert("Silinemedi: " + error.message);
+    return;
   }
+  questions = questions.filter((q) => q.id !== questionId);
+  syncMyQuestions();
+  renderQuestions();
 }
 
 // =============================================================
@@ -627,6 +1014,7 @@ async function startQuiz() {
       question_order: order,
       current_question_index: 0,
       current_question_started_at: now,
+      started_at: now,
     })
     .eq("id", currentRoom.id)
     .select()
@@ -918,6 +1306,7 @@ async function loadAndRenderResults() {
     const mine = rows.find((r) => r.id === me.id);
     if (mine) {
       resultsSummaryEl.textContent = `Sen: ${mine.correct}/${totalQuestions} doğru`;
+      updateStatsAfterQuiz(mine.correct, totalQuestions);
     }
   }
 }
@@ -953,6 +1342,11 @@ async function autoJoinFromUrl() {
 
 function init() {
   ensureClientId();
+  applyTheme();
+  applyLanguage();
+  ensureProfile();
+  ensureStats();
+  setupAvatarOptions();
   autoJoinFromUrl();
 }
 
