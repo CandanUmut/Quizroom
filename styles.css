@@ -12,6 +12,7 @@
   --gold: rgba(234, 179, 8, 0.18);
   --silver: rgba(148, 163, 184, 0.18);
   --bronze: rgba(234, 88, 12, 0.18);
+  --card-bg: var(--panel);
 }
 
 [data-theme="light"] {
@@ -27,6 +28,7 @@
   --gold: rgba(250, 204, 21, 0.3);
   --silver: rgba(148, 163, 184, 0.3);
   --bronze: rgba(234, 88, 12, 0.22);
+  --card-bg: var(--panel);
 }
 
 * {
@@ -258,6 +260,7 @@ button:active {
   color: var(--accent);
   background: rgba(56, 189, 248, 0.08);
   font-size: 0.9rem;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 /* ROOM */
@@ -445,6 +448,50 @@ button:active {
   margin-bottom: 12px;
 }
 
+.play-question-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+#timer-circle-wrapper {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+}
+
+.timer-circle {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 0.95rem;
+  background:
+    conic-gradient(var(--timer-color, #22c55e) calc(var(--timer-progress, 1) * 360deg),
+                   rgba(148, 163, 184, 0.2) 0deg);
+}
+
+.timer-circle::before {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border-radius: 50%;
+  background: var(--card-bg, #020617);
+}
+
+#timer-circle-label {
+  position: relative;
+  z-index: 1;
+  color: var(--text);
+}
+
 #timer-bar {
   flex: 1;
   height: 10px;
@@ -472,6 +519,7 @@ button:active {
   font-size: 1.1rem;
   font-weight: 700;
   margin-bottom: 12px;
+  flex: 1;
 }
 
 .options-grid {
@@ -488,15 +536,26 @@ button:active {
   background: linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(99, 102, 241, 0.18));
   border: 1px solid rgba(56, 189, 248, 0.35);
   color: var(--text);
+  transition: transform 0.12s ease, box-shadow 0.12s ease,
+    background-color 0.12s ease;
 }
 
 .option-btn:hover:not([disabled]) {
-  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.6);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.25);
+  transform: translateY(-1px);
 }
 
 .option-btn.selected {
   box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.9),
     0 10px 28px rgba(56, 189, 248, 0.35);
+}
+
+.option-btn.correct {
+  background-color: #16a34a33;
+}
+
+.option-btn.incorrect {
+  opacity: 0.55;
 }
 
 .option-letter {
