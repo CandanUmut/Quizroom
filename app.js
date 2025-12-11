@@ -577,6 +577,14 @@ async function fetchQuestions(roomId) {
   questions = data || [];
   syncMyQuestions();
   renderQuestions();
+  if (
+    currentRoom &&
+    currentRoom.status === "playing" &&
+    Array.isArray(currentRoom.question_order) &&
+    currentRoom.question_order.length
+  ) {
+    renderCurrentQuestion();
+  }
 }
 
 function syncMyQuestions() {
@@ -766,6 +774,7 @@ function attachRealtime(roomId) {
       "postgres_changes",
       { event: "*", schema: "public", table: "quiz_rooms", filter: `id=eq.${roomId}` },
       (payload) => {
+        console.log("[RT rooms]", payload);
         if (!payload.new) return;
         currentRoom = payload.new;
         renderRoom();
@@ -784,15 +793,16 @@ function attachRealtime(roomId) {
       "postgres_changes",
       { event: "*", schema: "public", table: "quiz_participants", filter: `room_id=eq.${roomId}` },
       () => {
-        fetchParticipants(roomId).then(() => renderParticipants());
+        console.log("[RT participants] change for room", roomId);
+        fetchParticipants(roomId);
       }
     )
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "quiz_questions", filter: `room_id=eq.${roomId}` },
       () => {
+        console.log("[RT questions] change for room", roomId);
         fetchQuestions(roomId).then(() => {
-          renderQuestions();
           renderRoom();
         });
       }
@@ -1011,6 +1021,7 @@ async function addQuestion() {
 
   // Optimistic update
   questions.push(data);
+  syncMyQuestions();
   renderQuestions();
 
   questionTextInput.value = "";
@@ -1215,6 +1226,7 @@ function renderCurrentQuestion() {
 /** Start timer bar & countdown for a question. */
 function startTimer(limitSeconds) {
   stopTimer();
+  const timerCircleLabel = document.getElementById("timer-circle-label");
 
   function tick() {
     if (!questionStartedAtMs) return;
@@ -1222,6 +1234,9 @@ function startTimer(limitSeconds) {
     const elapsed = (Date.now() - questionStartedAtMs) / 1000;
     const remainingSec = Math.max(0, total - elapsed);
     timerDisplayEl.textContent = formatSeconds(remainingSec);
+    if (timerCircleLabel) {
+      timerCircleLabel.textContent = formatSeconds(remainingSec);
+    }
 
     const ratio = Math.max(0, Math.min(1, remainingSec / total));
     timerBarFill.style.width = `${ratio * 100}%`;
