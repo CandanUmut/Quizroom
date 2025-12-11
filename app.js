@@ -155,6 +155,21 @@ function randomSlug(len = 6) {
   return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
 }
 
+function updateUrlForRoom(slug) {
+  if (!slug) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("room", slug);
+  window.history.replaceState({}, "", `${url.pathname}?${url.searchParams.toString()}`);
+}
+
+function clearRoomFromUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("room");
+  const query = url.searchParams.toString();
+  const newUrl = query ? `${url.pathname}?${query}` : url.pathname;
+  window.history.replaceState({}, "", newUrl);
+}
+
 function formatSeconds(sec) {
   const s = Math.max(0, Math.floor(sec));
   const m = Math.floor(s / 60);
@@ -196,6 +211,9 @@ function applyLanguage() {
   createNameInput.placeholder = currentLang === "tr" ? "Umut, Nova..." : "Jane, Nova...";
   joinNameInput.placeholder = currentLang === "tr" ? "İsmin" : "Your name";
   joinCodeInput.placeholder = currentLang === "tr" ? "Örn: ABC123" : "Ex: ABC123";
+
+  langTrBtn.classList.toggle("active", currentLang === "tr");
+  langEnBtn.classList.toggle("active", currentLang === "en");
 }
 
 function toggleTheme() {
@@ -455,6 +473,7 @@ const roomQuestionsListEl = document.getElementById("room-questions-list");
 const playQuestionCounterEl = document.getElementById("play-question-counter");
 const timerBarFill = document.getElementById("timer-bar-fill");
 const timerDisplayEl = document.getElementById("timer-display");
+const timerCircle = document.getElementById("timer-circle");
 const playQuestionTextEl = document.getElementById("play-question-text");
 const playOptionsEl = document.getElementById("play-options");
 const answerFeedbackEl = document.getElementById("answer-feedback");
@@ -601,6 +620,8 @@ function enterRoom(room, participant) {
   roomSection.classList.remove("hidden");
   rejoinNoticeEl.classList.add("hidden");
 
+  updateUrlForRoom(room.slug);
+
   attachRealtime(room.id);
   renderRoom();
   fetchParticipants(room.id);
@@ -628,6 +649,7 @@ function backToLobby() {
 
   lobbySection.classList.remove("hidden");
   roomSection.classList.add("hidden");
+  clearRoomFromUrl();
 
   hostControlsEl.innerHTML = "";
   participantsListEl.innerHTML = "";
@@ -738,9 +760,12 @@ function attachRealtime(roomId) {
       "postgres_changes",
       { event: "*", schema: "public", table: "quiz_rooms", filter: `id=eq.${roomId}` },
       (payload) => {
-        if (payload.new) {
-          currentRoom = payload.new;
-          renderRoom();
+        if (!payload.new) return;
+        currentRoom = payload.new;
+        renderRoom();
+        renderPhaseViews();
+        if (currentRoom.status === "playing") {
+          renderCurrentQuestion();
         }
       }
     )
@@ -748,14 +773,17 @@ function attachRealtime(roomId) {
       "postgres_changes",
       { event: "*", schema: "public", table: "quiz_participants", filter: `room_id=eq.${roomId}` },
       () => {
-        fetchParticipants(roomId);
+        fetchParticipants(roomId).then(() => renderParticipants());
       }
     )
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "quiz_questions", filter: `room_id=eq.${roomId}` },
       () => {
-        fetchQuestions(roomId);
+        fetchQuestions(roomId).then(() => {
+          renderQuestions();
+          renderRoom();
+        });
       }
     )
     .subscribe();
@@ -1115,25 +1143,35 @@ async function resetToCollecting() {
 /** Render the currently active question in play mode. */
 function renderCurrentQuestion() {
   if (!currentRoom || !currentRoom.question_order || currentRoom.question_order.length === 0) {
-    playQuestionTextEl.textContent = "Sorular yükleniyor...";
+    playQuestionTextEl.textContent = currentLang === "tr" ? "Sorular yükleniyor..." : "Loading questions...";
     playOptionsEl.innerHTML = "";
     return;
   }
 
   const idx = currentRoom.current_question_index || 0;
   const questionId = currentRoom.question_order[idx];
+
+  if (!questions || !questions.length) {
+    playQuestionTextEl.textContent = currentLang === "tr" ? "Sorular getiriliyor..." : "Fetching questions...";
+    playOptionsEl.innerHTML = "";
+    fetchQuestions(currentRoom.id);
+    return;
+  }
+
   currentQuestion = questions.find((q) => q.id === questionId);
 
   if (!currentQuestion) {
-    playQuestionTextEl.textContent = "Soru bulunamadı.";
+    playQuestionTextEl.textContent = currentLang === "tr" ? "Soru bulunamadı." : "Question not found.";
     playOptionsEl.innerHTML = "";
+    fetchQuestions(currentRoom.id);
     return;
   }
 
   hasAnsweredCurrent = false;
   answerFeedbackEl.textContent = "";
 
-  playQuestionCounterEl.textContent = `Soru ${idx + 1}/${currentRoom.question_order.length}`;
+  const counterLabel = currentLang === "tr" ? "Soru" : "Question";
+  playQuestionCounterEl.textContent = `${counterLabel} ${idx + 1}/${currentRoom.question_order.length}`;
   playQuestionTextEl.textContent = currentQuestion.text || "";
 
   playOptionsEl.innerHTML = "";
@@ -1169,12 +1207,23 @@ function startTimer(limitSeconds) {
 
     const ratio = Math.max(0, Math.min(1, remainingSec / total));
     timerBarFill.style.width = `${ratio * 100}%`;
+    if (timerCircle) {
+      const deg = ratio * 360;
+      timerCircle.style.setProperty("--timer-progress", ratio);
+      timerCircle.style.background = `conic-gradient(var(--accent-color, #38bdf8) ${deg}deg, var(--card-bg, #111827) 0deg)`;
+    }
 
     if (remainingSec <= 0) {
       timerDisplayEl.textContent = "00:00";
       timerBarFill.style.width = "0%";
       clearInterval(timerInterval);
       timerInterval = null;
+      if (!answerFeedbackEl.textContent) {
+        answerFeedbackEl.textContent =
+          currentLang === "tr"
+            ? "Süren doldu, host sonraki soruya geçene kadar bekliyoruz..."
+            : "Time is up, waiting for host to go to next question...";
+      }
     }
   }
 
@@ -1189,6 +1238,9 @@ function stopTimer() {
   }
   timerBarFill.style.width = "0%";
   timerDisplayEl.textContent = "--";
+  if (timerCircle) {
+    timerCircle.style.background = "conic-gradient(var(--accent-color, #38bdf8) 0deg, var(--card-bg, #111827) 0deg)";
+  }
 }
 
 /** Persist an answer for the current player and show quick feedback. */
@@ -1219,9 +1271,10 @@ async function handleAnswerClick(answerIndex, btnEl) {
     return;
   }
 
-  answerFeedbackEl.textContent = isCorrect
-    ? "Doğru! 🎉"
-    : "Yanlış, olsun sıradaki soruya bakalım.";
+  const correctMsg = currentLang === "tr" ? "Doğru! 🎉" : "Correct! 🎉";
+  const incorrectMsg =
+    currentLang === "tr" ? "Yanlış, sıradaki soruya bakalım." : "Incorrect, let’s see the next one.";
+  answerFeedbackEl.textContent = isCorrect ? correctMsg : incorrectMsg;
 }
 
 // =============================================================
@@ -1317,27 +1370,54 @@ async function loadAndRenderResults() {
 /** Try to auto rejoin using ?room= or the last saved room slug. */
 async function autoJoinFromUrl() {
   const params = new URLSearchParams(window.location.search);
-  const roomSlug = params.get("room") || localStorage.getItem(LS_LAST_ROOM);
+  const roomSlug = params.get("room");
+  const lastSlug = localStorage.getItem(LS_LAST_ROOM);
   const lastName = localStorage.getItem(LS_LAST_NAME) || "";
-  if (!roomSlug) return;
 
-  ensureClientId();
-  joinCodeInput.value = roomSlug.toUpperCase();
-  if (lastName) joinNameInput.value = lastName;
+  if (roomSlug) {
+    ensureClientId();
+    joinCodeInput.value = roomSlug.toUpperCase();
+    if (lastName) joinNameInput.value = lastName;
 
-  const room = await fetchRoomBySlug(roomSlug.toUpperCase());
-  if (!room) return;
+    const room = await fetchRoomBySlug(roomSlug.toUpperCase());
+    if (!room) return;
 
-  const participant = await findExistingParticipant(room.id);
-  if (participant) {
-    rejoinNoticeEl.textContent = `${participant.name} olarak odaya tekrar bağlanılıyor...`;
+    const participant = await findExistingParticipant(room.id);
+    if (participant) {
+      rejoinNoticeEl.textContent = `${participant.name} olarak odaya tekrar bağlanılıyor...`;
+      rejoinNoticeEl.classList.remove("hidden");
+      enterRoom(room, participant);
+      return;
+    }
+
+    rejoinNoticeEl.textContent = `${lastName || ""} olarak yeniden katılmak için form hazır.`;
     rejoinNoticeEl.classList.remove("hidden");
-    enterRoom(room, participant);
+    if (lastName) {
+      joinRoom();
+    }
     return;
   }
 
-  rejoinNoticeEl.textContent = `${lastName || ""} olarak yeniden katılmak için form hazır.`;
-  rejoinNoticeEl.classList.remove("hidden");
+  if (lastSlug) {
+    rejoinNoticeEl.innerHTML = "";
+    const text = document.createElement("span");
+    text.textContent =
+      currentLang === "tr"
+        ? `${lastSlug} kodlu son odana tekrar katılmak ister misin?`
+        : `Rejoin your last room ${lastSlug}?`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "small";
+    btn.textContent = currentLang === "tr" ? "Katıl" : "Rejoin";
+    btn.onclick = () => {
+      joinCodeInput.value = lastSlug.toUpperCase();
+      if (lastName) joinNameInput.value = lastName;
+      joinRoom();
+    };
+    rejoinNoticeEl.appendChild(text);
+    rejoinNoticeEl.appendChild(btn);
+    rejoinNoticeEl.classList.remove("hidden");
+  }
 }
 
 function init() {
