@@ -19,6 +19,7 @@
         <div class="header-actions">
           <div id="profile-chip" class="profile-chip" role="button"></div>
           <div class="toggle-row">
+            <button id="sound-toggle" class="chip-btn" type="button">🔊</button>
             <button id="theme-toggle" class="chip-btn" type="button">🌙</button>
             <div class="lang-switch">
               <button id="lang-tr" class="chip-btn" type="button">🇹🇷</button>
@@ -164,6 +165,11 @@
                   <button id="add-question-btn" data-i18n="btnSaveQuestion">Soruyu Ekle</button>
                   <button id="new-question-btn" class="secondary" type="button" data-i18n="btnNewQuestion">+ Yeni</button>
                 </div>
+                <textarea id="bulk-input" rows="8" placeholder="Paste bulk questions..."></textarea>
+                <div class="actions-row">
+                  <button id="bulk-import-btn" class="secondary" type="button">Bulk Import</button>
+                  <span class="hint">Format: Q:, A) B) C) D), Correct: B, Time: 20</span>
+                </div>
                 <div class="error" id="question-error"></div>
               </div>
 
@@ -198,15 +204,11 @@
 
             <div id="play-question-card" class="panel">
               <div class="play-question-header">
-                <div id="timer-circle-wrapper">
-                  <div id="timer-circle" class="timer-circle">
-                    <span id="timer-circle-label">00:20</span>
-                  </div>
-                </div>
                 <div id="play-question-text" class="question-text"></div>
               </div>
               <div id="play-options" class="options-grid"></div>
               <div id="answer-feedback" class="hint"></div>
+              <div id="play-scoreboard" class="panel scoreboard hidden"></div>
             </div>
           </div>
 

@@ -515,6 +515,45 @@ button:active {
   color: var(--text-soft);
 }
 
+#bulk-input {
+  margin-top: 10px;
+}
+
+#play-scoreboard {
+  margin-top: 12px;
+}
+
+.scoreboard-section {
+  margin-bottom: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(56, 189, 248, 0.04);
+}
+
+.score-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+  gap: 8px;
+}
+
+.score-row:last-child {
+  border-bottom: none;
+}
+
+.score-name {
+  font-weight: 600;
+}
+
+.score-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 0.9rem;
+}
+
 .question-text {
   font-size: 1.1rem;
   font-weight: 700;
