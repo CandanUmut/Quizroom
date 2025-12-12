@@ -48,6 +48,8 @@ let lastRoomHash = null;
 let audioCtx = null;
 let soundEnabled = localStorage.getItem(LS_SOUND) !== "off";
 let myLastAnswerCorrect = null;
+const answerStateByQuestionId = new Map();
+const soundCooldowns = new Map();
 
 const textMap = {
   tr: {
@@ -227,6 +229,45 @@ async function playTone({ freq = 440, durationMs = 180, type = "sine", gain = 0.
   oscillator.stop(now + durationMs / 1000 + 0.05);
 }
 
+function throttleSound(type, cooldownMs = 150) {
+  const now = Date.now();
+  const last = soundCooldowns.get(type) || 0;
+  if (now - last < cooldownMs) return false;
+  soundCooldowns.set(type, now);
+  return true;
+}
+
+async function playSound(type) {
+  if (!soundEnabled) return;
+  if (!throttleSound(type, 180)) return;
+  switch (type) {
+    case "click":
+      await playTone({ freq: 540, durationMs: 70, type: "square", gain: 0.035 });
+      break;
+    case "submit":
+      await playTone({ freq: 720, durationMs: 160, type: "triangle", gain: 0.05 });
+      break;
+    case "start":
+      await playTone({ freq: 520, slideTo: 880, durationMs: 320, type: "sawtooth", gain: 0.05 });
+      break;
+    case "correct":
+      await playTone({ freq: 880, slideTo: 960, durationMs: 220, type: "triangle", gain: 0.05 });
+      break;
+    case "wrong":
+      await playTone({ freq: 200, durationMs: 200, type: "sine", gain: 0.06 });
+      break;
+    case "finish":
+      await playTone({ freq: 660, durationMs: 200, type: "triangle", gain: 0.05 });
+      setTimeout(() => playTone({ freq: 880, durationMs: 200, type: "triangle", gain: 0.05 }), 160);
+      break;
+    case "countdown":
+      await playTone({ freq: 480, durationMs: 90, type: "sine", gain: 0.04 });
+      break;
+    default:
+      break;
+  }
+}
+
 function updateSoundToggle() {
   if (!soundToggle) return;
   soundToggle.textContent = soundEnabled ? "🔊" : "🔇";
@@ -247,6 +288,10 @@ function shuffle(arr) {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy;
+}
+
+function clamp(val, min, max) {
+  return Math.max(min, Math.min(max, val));
 }
 
 function humanizeStatus(status) {
@@ -1127,6 +1172,12 @@ function renderHostControls() {
     btnRestart.textContent = "Yeni Tur (aynı oda)";
     btnRestart.onclick = resetToCollecting;
     hostControlsEl.appendChild(btnRestart);
+
+    const btnNewSession = document.createElement("button");
+    btnNewSession.className = "secondary";
+    btnNewSession.textContent = "Yeni Oturum (soruları temizle)";
+    btnNewSession.onclick = clearSessionAndQuestions;
+    hostControlsEl.appendChild(btnNewSession);
   }
 }
 
@@ -1390,7 +1441,7 @@ async function startQuiz() {
   currentRoom = data;
   hasAnsweredCurrent = false;
   renderRoom();
-  playTone({ freq: 520, slideTo: 880, durationMs: 300, type: "sawtooth", gain: 0.05 });
+  playSound("start");
 }
 
 /** Host moves to the next question or finishes when out of questions. */
@@ -1445,8 +1496,7 @@ async function finishQuiz() {
   }
   currentRoom = data;
   renderRoom();
-  playTone({ freq: 660, durationMs: 200, type: "triangle", gain: 0.05 });
-  setTimeout(() => playTone({ freq: 880, durationMs: 200, type: "triangle", gain: 0.05 }), 180);
+  playSound("finish");
 }
 
 /** Host resets room to collecting state but keeps questions. */
@@ -1491,6 +1541,74 @@ async function resetToCollecting() {
 
   currentRoom = data;
   confettiPlayed = false;
+  answerStateByQuestionId.clear();
+  renderRoom();
+}
+
+async function clearSessionAndQuestions() {
+  if (!currentRoom) return;
+  if (!me || currentRoom.host_name !== me.name) return;
+  const confirmed = window.confirm(
+    currentLang === "tr"
+      ? "Tüm sorular ve cevaplar silinsin mi?"
+      : "Clear all questions and answers for a fresh session?"
+  );
+  if (!confirmed) return;
+
+  const { data: qs, error: qErr } = await supabase
+    .from("quiz_questions")
+    .select("id")
+    .eq("room_id", currentRoom.id);
+  if (qErr) {
+    alert("Sorular alınamadı: " + qErr.message);
+    return;
+  }
+
+  const questionIds = (qs || []).map((q) => q.id);
+  if (questionIds.length) {
+    const { error: delAnsErr } = await supabase
+      .from("quiz_answers")
+      .delete()
+      .in("question_id", questionIds);
+    if (delAnsErr) {
+      logError("clearSessionAndQuestions", delAnsErr);
+    }
+  }
+
+  if (questionIds.length) {
+    const { error: delQsErr } = await supabase
+      .from("quiz_questions")
+      .delete()
+      .in("id", questionIds);
+    if (delQsErr) {
+      alert("Sorular silinemedi: " + delQsErr.message);
+      return;
+    }
+  }
+
+  const { data, error } = await supabase
+    .from("quiz_rooms")
+    .update({
+      status: "collecting",
+      question_order: null,
+      current_question_index: null,
+      current_question_started_at: null,
+    })
+    .eq("id", currentRoom.id)
+    .select()
+    .single();
+
+  if (error) {
+    alert("Sıfırlanamadı: " + error.message);
+    return;
+  }
+
+  currentRoom = data;
+  questions = [];
+  myQuestions = [];
+  answerStateByQuestionId.clear();
+  renderQuestions();
+  confettiPlayed = false;
   renderRoom();
 }
 
@@ -1530,14 +1648,20 @@ function renderCurrentQuestion(opts = {}) {
   }
 
   if (activeQuestionId === questionId && !force) {
+    applyAnswerStateToUI(questionId);
     return;
   }
 
+  const isNewQuestion = activeQuestionId !== questionId;
   activeQuestionId = questionId;
-  hasAnsweredCurrent = false;
   revealMode = false;
   myLastAnswerCorrect = null;
-  answerFeedbackEl.textContent = "";
+  if (isNewQuestion) {
+    hasAnsweredCurrent = answerStateByQuestionId.has(questionId);
+    if (!hasAnsweredCurrent) {
+      answerFeedbackEl.textContent = "";
+    }
+  }
   if (playScoreboardEl) {
     playScoreboardEl.classList.add("hidden");
     playScoreboardEl.innerHTML = "";
@@ -1564,11 +1688,13 @@ function renderCurrentQuestion(opts = {}) {
   questionEndTime = questionStartedAtMs + limit * 1000;
 
   startTimer(limit);
+  applyAnswerStateToUI(questionId);
 }
 
 /** Start timer bar & countdown for a question. */
 function startTimer(limitSeconds) {
   stopTimer();
+  let lastBeep = null;
 
   function tick() {
     if (!questionStartedAtMs) return;
@@ -1579,6 +1705,12 @@ function startTimer(limitSeconds) {
 
     const ratio = Math.max(0, Math.min(1, remainingSec / total));
     timerBarFill.style.width = `${ratio * 100}%`;
+
+    const rounded = Math.ceil(remainingSec);
+    if (rounded <= 5 && rounded !== lastBeep) {
+      lastBeep = rounded;
+      playSound("countdown");
+    }
 
     if (remainingSec <= 0) {
       timerDisplayEl.textContent = "00:00";
@@ -1613,6 +1745,7 @@ function resetLocalPlayState() {
   revealMode = false;
   activeQuestionId = null;
   resultsRendered = false;
+  answerStateByQuestionId.clear();
   stopTimer();
   answerFeedbackEl.textContent = "";
   playQuestionTextEl.textContent = "";
@@ -1622,12 +1755,35 @@ function resetLocalPlayState() {
   timerDisplayEl.textContent = "--";
 }
 
+function applyAnswerStateToUI(questionId) {
+  if (!questionId) return;
+  const state = answerStateByQuestionId.get(questionId);
+  const buttons = playOptionsEl.querySelectorAll("button");
+  if (!state) {
+    buttons.forEach((b) => b.classList.remove("selected"));
+    buttons.forEach((b) => (b.disabled = false));
+    return;
+  }
+
+  buttons.forEach((b, idx) => {
+    b.disabled = true;
+    b.classList.toggle("selected", idx === state.selectedIndex);
+  });
+  if (state.status === "pending") {
+    answerFeedbackEl.textContent = currentLang === "tr" ? "Gönderiliyor..." : "Submitting...";
+  } else {
+    answerFeedbackEl.textContent = currentLang === "tr" ? "Gönderildi ✅" : "Submitted ✅";
+  }
+}
+
 /** Persist an answer for the current player and show quick feedback. */
 async function handleAnswerClick(answerIndex, btnEl) {
-  if (!currentQuestion || !me || hasAnsweredCurrent) return;
+  if (!currentQuestion || !me) return;
+  const qid = currentQuestion.id;
+  if (answerStateByQuestionId.has(qid)) return;
 
   hasAnsweredCurrent = true;
-  playTone({ freq: 540, durationMs: 80, type: "square", gain: 0.04 });
+  playSound("click");
 
   const buttons = playOptionsEl.querySelectorAll("button");
   buttons.forEach((b) => {
@@ -1636,25 +1792,73 @@ async function handleAnswerClick(answerIndex, btnEl) {
   });
   btnEl.classList.add("selected");
 
+  const limit = currentQuestion.time_limit_sec || currentRoom.default_time_limit_sec || 20;
+  const answerMs = Math.max(0, Date.now() - (questionStartedAtMs || Date.now()));
+  const ratio = clamp(1 - answerMs / (limit * 1000), 0, 1);
+  const isCorrect = answerIndex === currentQuestion.correct_index;
+  const points = isCorrect ? 1000 + Math.floor(1000 * ratio) : 0;
+
+  answerStateByQuestionId.set(qid, {
+    selectedIndex: answerIndex,
+    status: "pending",
+    answeredAt: Date.now(),
+    answerMs,
+    points,
+  });
+  applyAnswerStateToUI(qid);
+
   const { error } = await supabase.from("quiz_answers").insert({
-    question_id: currentQuestion.id,
+    question_id: qid,
     participant_id: me.id,
     answer_index: answerIndex,
-    is_correct: answerIndex === currentQuestion.correct_index,
+    is_correct: isCorrect,
+    answer_ms: answerMs,
+    points,
   });
 
-  myLastAnswerCorrect = answerIndex === currentQuestion.correct_index;
+  myLastAnswerCorrect = isCorrect;
 
   if (error) {
-    answerFeedbackEl.textContent = "Cevap kaydedilemedi: " + error.message;
     logError("handleAnswerClick", error);
+    if (error.code === "23505") {
+      const { data: existing } = await supabase
+        .from("quiz_answers")
+        .select("answer_index,answer_ms,points")
+        .eq("question_id", qid)
+        .eq("participant_id", me.id)
+        .maybeSingle();
+      const recoveredIndex = existing?.answer_index ?? answerIndex;
+      answerStateByQuestionId.set(qid, {
+        selectedIndex: recoveredIndex,
+        status: "saved",
+        answeredAt: Date.now(),
+        answerMs: existing?.answer_ms ?? answerMs,
+        points: existing?.points ?? points,
+      });
+      applyAnswerStateToUI(qid);
+      answerFeedbackEl.textContent = currentLang === "tr" ? "Zaten gönderdin ✅" : "Already submitted ✅";
+      return;
+    }
+    answerFeedbackEl.textContent =
+      currentLang === "tr"
+        ? "Cevap kaydedilemedi: " + (error.message || "")
+        : "Could not save answer: " + (error.message || "");
     return;
   }
 
+  answerStateByQuestionId.set(qid, {
+    selectedIndex: answerIndex,
+    status: "saved",
+    answeredAt: Date.now(),
+    answerMs,
+    points,
+  });
+  applyAnswerStateToUI(qid);
   answerFeedbackEl.textContent =
     currentLang === "tr"
       ? "Cevabın kaydedildi, doğru cevap açıklanıncaya kadar bekle."
       : "Answer saved, wait for the reveal.";
+  playSound("submit");
 }
 
 async function revealCorrectAnswerForEveryone() {
@@ -1675,9 +1879,9 @@ async function revealCorrectAnswerForEveryone() {
   await showPostQuestionScoreboard();
 
   if (myLastAnswerCorrect === true) {
-    playTone({ freq: 880, slideTo: 960, durationMs: 220, type: "triangle", gain: 0.05 });
+    playSound("correct");
   } else if (myLastAnswerCorrect === false) {
-    playTone({ freq: 200, durationMs: 180, type: "sine", gain: 0.05 });
+    playSound("wrong");
   }
 }
 
@@ -1826,7 +2030,7 @@ async function loadAndRenderResults() {
 
   const { data: ans, error: aErr } = await supabase
     .from("quiz_answers")
-    .select("participant_id,is_correct,question_id")
+    .select("participant_id,is_correct,question_id,points")
     .in("question_id", questionIds);
   if (aErr) {
     resultsListEl.textContent = "Cevaplar alınamadı: " + aErr.message;
@@ -1834,39 +2038,69 @@ async function loadAndRenderResults() {
   }
 
   const scoreMap = new Map();
-  parts.forEach((p) => scoreMap.set(p.id, 0));
+  parts.forEach((p) => scoreMap.set(p.id, { points: 0, correct: 0 }));
   ans.forEach((a) => {
-    if (a.is_correct) {
-      const prev = scoreMap.get(a.participant_id) || 0;
-      scoreMap.set(a.participant_id, prev + 1);
-    }
+    const row = scoreMap.get(a.participant_id) || { points: 0, correct: 0 };
+    row.points += a.points || 0;
+    if (a.is_correct) row.correct += 1;
+    scoreMap.set(a.participant_id, row);
   });
 
   const rows = parts
     .map((p) => ({
       id: p.id,
       name: p.name,
-      correct: scoreMap.get(p.id) || 0,
+      correct: scoreMap.get(p.id)?.correct || 0,
+      points: scoreMap.get(p.id)?.points || 0,
     }))
-    .sort((a, b) => b.correct - a.correct);
+    .sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      return b.correct - a.correct;
+    });
 
   const totalQuestions = questionIds.length;
 
+  const podiumContainer = document.createElement("div");
+  podiumContainer.className = "podium";
+  const topThree = rows.slice(0, 3);
+  const places = [2, 0, 1];
+  places.forEach((placeIdx, visualIdx) => {
+    const entry = topThree[placeIdx];
+    if (!entry) return;
+    const card = document.createElement("div");
+    card.className = `podium-spot place-${visualIdx + 1}`;
+    const name = document.createElement("div");
+    name.className = "podium-name";
+    name.textContent = entry.name;
+    const score = document.createElement("div");
+    score.className = "podium-score";
+    score.dataset.target = entry.points;
+    score.textContent = "0";
+    const badge = document.createElement("div");
+    badge.className = "podium-rank";
+    badge.textContent = `${placeIdx + 1}`;
+    card.appendChild(badge);
+    card.appendChild(name);
+    card.appendChild(score);
+    podiumContainer.appendChild(card);
+  });
+
   const table = document.createElement("table");
   const thead = document.createElement("thead");
-  thead.innerHTML = "<tr><th>Sıra</th><th>İsim</th><th>Doğru</th><th>Toplam soru</th></tr>";
+  thead.innerHTML = "<tr><th>Sıra</th><th>İsim</th><th>Doğru</th><th>Puan</th><th>Toplam soru</th></tr>";
   table.appendChild(thead);
 
   const tbody = document.createElement("tbody");
   rows.forEach((row, idx) => {
     const tr = document.createElement("tr");
     tr.classList.add(`rank-${idx + 1}`);
-    tr.innerHTML = `<td>${idx + 1}</td><td>${row.name}</td><td>${row.correct}</td><td>${totalQuestions}</td>`;
+    tr.innerHTML = `<td>${idx + 1}</td><td>${row.name}</td><td>${row.correct}</td><td>${row.points}</td><td>${totalQuestions}</td>`;
     tbody.appendChild(tr);
   });
 
   table.appendChild(tbody);
   resultsListEl.innerHTML = "";
+  if (topThree.length) resultsListEl.appendChild(podiumContainer);
   resultsListEl.appendChild(table);
 
   if (me) {
@@ -1876,6 +2110,24 @@ async function loadAndRenderResults() {
       updateStatsAfterQuiz(mine.correct, totalQuestions);
     }
   }
+
+  animatePodiumScores();
+  if (topThree.length) triggerConfetti();
+}
+
+function animatePodiumScores() {
+  const scores = resultsListEl.querySelectorAll(".podium-score");
+  const duration = 1200;
+  scores.forEach((el) => {
+    const target = Number(el.dataset.target || 0);
+    const start = performance.now();
+    function step(now) {
+      const progress = clamp((now - start) / duration, 0, 1);
+      el.textContent = Math.floor(target * progress).toString();
+      if (progress < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  });
 }
 
 // =============================================================
@@ -1942,6 +2194,13 @@ function init() {
   ensureStats();
   setupAvatarOptions();
   updateSoundToggle();
+  document.addEventListener(
+    "click",
+    () => {
+      ensureAudio();
+    },
+    { once: true }
+  );
   autoJoinFromUrl();
 }
 
