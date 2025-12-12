@@ -15,6 +15,7 @@ const LS_LANG = "quiz_lang";
 const LS_THEME = "quiz_theme";
 const LS_PROFILE = "quiz_profile";
 const LS_STATS = "quiz_stats";
+const LS_SOUND = "quiz_sound";
 
 // =============================================================
 // Global state & helpers
@@ -44,6 +45,9 @@ let questionsFetchTimer = null;
 let syncInterval = null;
 let lastQuestionsCount = null;
 let lastRoomHash = null;
+let audioCtx = null;
+let soundEnabled = localStorage.getItem(LS_SOUND) !== "off";
+let myLastAnswerCorrect = null;
 
 const textMap = {
   tr: {
@@ -183,6 +187,57 @@ function formatSeconds(sec) {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `${m.toString().padStart(2, "0")}:${r.toString().padStart(2, "0")}`;
+}
+
+async function ensureAudio() {
+  if (!soundEnabled) return null;
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContext) return null;
+  if (!audioCtx) {
+    audioCtx = new AudioContext();
+  }
+  if (audioCtx.state === "suspended") {
+    try {
+      await audioCtx.resume();
+    } catch (err) {
+      console.error("Audio resume failed", err);
+    }
+  }
+  return audioCtx;
+}
+
+async function playTone({ freq = 440, durationMs = 180, type = "sine", gain = 0.04, slideTo }) {
+  if (!soundEnabled) return;
+  const ctx = await ensureAudio();
+  if (!ctx) return;
+
+  const oscillator = ctx.createOscillator();
+  const gainNode = ctx.createGain();
+  oscillator.type = type;
+  oscillator.frequency.value = freq;
+  gainNode.gain.value = gain;
+  oscillator.connect(gainNode).connect(ctx.destination);
+
+  const now = ctx.currentTime;
+  if (slideTo) {
+    oscillator.frequency.linearRampToValueAtTime(slideTo, now + durationMs / 1000);
+  }
+  oscillator.start(now);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, now + durationMs / 1000);
+  oscillator.stop(now + durationMs / 1000 + 0.05);
+}
+
+function updateSoundToggle() {
+  if (!soundToggle) return;
+  soundToggle.textContent = soundEnabled ? "🔊" : "🔇";
+  soundToggle.setAttribute("aria-pressed", soundEnabled ? "true" : "false");
+}
+
+async function toggleSound() {
+  soundEnabled = !soundEnabled;
+  localStorage.setItem(LS_SOUND, soundEnabled ? "on" : "off");
+  updateSoundToggle();
+  await ensureAudio();
 }
 
 function shuffle(arr) {
@@ -449,6 +504,7 @@ const hostControlsEl = document.getElementById("host-controls");
 const backToLobbyBtn = document.getElementById("back-to-lobby-btn");
 const profileChip = document.getElementById("profile-chip");
 const themeToggle = document.getElementById("theme-toggle");
+const soundToggle = document.getElementById("sound-toggle");
 const langTrBtn = document.getElementById("lang-tr");
 const langEnBtn = document.getElementById("lang-en");
 const playerStatsChip = document.getElementById("player-stats-chip");
@@ -473,6 +529,8 @@ const correctIndexSelect = document.getElementById("correct-index");
 const tfCorrectSelect = document.getElementById("tf-correct");
 const questionTimeLimitInput = document.getElementById("question-time-limit");
 const addQuestionBtn = document.getElementById("add-question-btn");
+const bulkInputEl = document.getElementById("bulk-input");
+const bulkImportBtn = document.getElementById("bulk-import-btn");
 const questionErrorEl = document.getElementById("question-error");
 
 const myQuestionsListEl = document.getElementById("my-questions-list");
@@ -485,6 +543,7 @@ const timerCircle = document.getElementById("timer-circle");
 const playQuestionTextEl = document.getElementById("play-question-text");
 const playOptionsEl = document.getElementById("play-options");
 const answerFeedbackEl = document.getElementById("answer-feedback");
+const playScoreboardEl = document.getElementById("play-scoreboard");
 
 const resultsSummaryEl = document.getElementById("results-summary");
 const resultsListEl = document.getElementById("results-list");
@@ -504,6 +563,7 @@ createRoomBtn.addEventListener("click", createRoom);
 joinRoomBtn.addEventListener("click", joinRoom);
 backToLobbyBtn.addEventListener("click", backToLobby);
 addQuestionBtn.addEventListener("click", addQuestion);
+bulkImportBtn.addEventListener("click", bulkImportQuestions);
 document.getElementById("new-question-btn").addEventListener("click", () => {
   questionTextInput.value = "";
   optionAInput.value = "";
@@ -532,8 +592,26 @@ closeAvatarBtn.addEventListener("click", () => {
 });
 saveAvatarBtn.addEventListener("click", saveAvatarSelection);
 themeToggle.addEventListener("click", toggleTheme);
+if (soundToggle) soundToggle.addEventListener("click", toggleSound);
 langTrBtn.addEventListener("click", () => changeLanguage("tr"));
 langEnBtn.addEventListener("click", () => changeLanguage("en"));
+document.addEventListener(
+  "click",
+  () => {
+    ensureAudio();
+  },
+  { once: true }
+);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && currentRoom) {
+    resyncRoomState(currentRoom.id, { forceQuestionRender: true });
+  }
+});
+window.addEventListener("online", () => {
+  if (currentRoom) {
+    resyncRoomState(currentRoom.id, { forceQuestionRender: true });
+  }
+});
 
 // =============================================================
 // Supabase helpers
@@ -575,6 +653,16 @@ async function fetchParticipants(roomId) {
     if (mine) me = mine;
   }
   renderParticipants();
+}
+
+async function resyncRoomState(roomId, opts = {}) {
+  if (!roomId) return;
+  const fresh = await fetchRoomById(roomId);
+  if (fresh) {
+    await applyRoomState(fresh, { forceQuestionRender: opts.forceQuestionRender });
+  }
+  await fetchParticipants(roomId);
+  scheduleFetchQuestions(roomId);
 }
 
 /** Fetch questions for the room and render. */
@@ -846,6 +934,17 @@ function startSyncLoop(roomId) {
       if (currentRoom.status === "collecting") {
         if (now - lastCollectCheck < 2000) return;
         lastCollectCheck = now;
+
+        const fresh = await fetchRoomById(roomId);
+        if (fresh) {
+          const h = computeRoomHash(fresh);
+          if (h !== lastRoomHash) {
+            lastRoomHash = h;
+            await applyRoomState(fresh, { forceQuestionRender: true });
+          }
+          lastRoomHash = h;
+        }
+
         const c = await fetchQuestionsCount(roomId);
         if (c !== null && c !== lastQuestionsCount) {
           lastQuestionsCount = c;
@@ -861,6 +960,7 @@ function startSyncLoop(roomId) {
           lastRoomHash = h;
           await applyRoomState(fresh, { forceQuestionRender: true });
         }
+        lastRoomHash = h;
       }
     } catch (err) {
       console.error("syncLoop error", err);
@@ -905,7 +1005,12 @@ function attachRealtime(roomId) {
         scheduleFetchQuestions(roomId);
       }
     )
-    .subscribe();
+    .subscribe(async (status) => {
+      console.log("[RT status]", status);
+      if (status === "SUBSCRIBED") {
+        await resyncRoomState(roomId, { forceQuestionRender: true });
+      }
+    });
 }
 
 // =============================================================
@@ -1039,7 +1144,7 @@ function renderPhaseViews() {
     playView.classList.remove("hidden");
     resultsView.classList.add("hidden");
     resultsRendered = false;
-    // Rendering the active question is triggered from realtime + fetchQuestions.
+    renderCurrentQuestion({ force: true });
   } else if (currentRoom.status === "finished") {
     collectView.classList.add("hidden");
     playView.classList.add("hidden");
@@ -1133,6 +1238,106 @@ async function addQuestion() {
   questionTimeLimitInput.value = "";
 }
 
+function parseBulkQuestions(rawText) {
+  if (!rawText) return [];
+  const blocks = rawText
+    .split(/\n\s*\n+/)
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  const results = [];
+  blocks.forEach((block) => {
+    const qMatch = block.match(/Q:\s*(.+)/i);
+    if (!qMatch) return;
+    const text = qMatch[1].trim();
+
+    const optionMatches = [...block.matchAll(/^[A-D]\)\s*(.+)$/gim)];
+    const correctMatch = block.match(/Correct:\s*([A-D]|True|False|Doğru|Yanlış)/i);
+    const timeMatch = block.match(/Time:\s*(\d+)/i);
+    const tfLine = block.match(/TF:\s*(True|False)/i);
+    const question = {
+      text,
+      question_type: "mcq",
+      options: [],
+      correct_index: 0,
+      time_limit_sec: timeMatch ? parseInt(timeMatch[1], 10) || null : null,
+    };
+
+    if (optionMatches.length >= 2) {
+      question.options = optionMatches.map((m) => m[1].trim());
+      question.question_type = "mcq";
+      if (correctMatch) {
+        const letter = correctMatch[1].trim().toUpperCase();
+        const idx = letter.charCodeAt(0) - "A".charCodeAt(0);
+        question.correct_index = idx >= 0 && idx < question.options.length ? idx : 0;
+      }
+    } else {
+      question.question_type = "tf";
+      question.options = ["True", "False"];
+      const optionsLine = block.match(/Options:\s*True\s*\|\s*False/i);
+      if (optionsLine) {
+        question.options = ["True", "False"];
+      }
+      const correctVal = (correctMatch?.[1] || tfLine?.[1] || "True").toLowerCase();
+      question.correct_index = /false|yanl/i.test(correctVal) ? 1 : 0;
+    }
+
+    if (question.time_limit_sec && question.time_limit_sec < 5) {
+      question.time_limit_sec = null;
+    }
+
+    results.push(question);
+  });
+
+  return results;
+}
+
+async function bulkImportQuestions() {
+  questionErrorEl.textContent = "";
+  if (!currentRoom || !me) {
+    questionErrorEl.textContent = "Oda bulunamadı.";
+    return;
+  }
+  if (currentRoom.status !== "collecting") {
+    questionErrorEl.textContent = "Sadece toplama aşamasında ekleyebilirsin.";
+    return;
+  }
+  const raw = bulkInputEl?.value?.trim();
+  if (!raw) {
+    questionErrorEl.textContent = "Önce metin yapıştır.";
+    return;
+  }
+  const parsed = parseBulkQuestions(raw);
+  if (!parsed.length) {
+    questionErrorEl.textContent = "Format çözümlenemedi.";
+    return;
+  }
+
+  const payload = parsed.map((q) => ({
+    room_id: currentRoom.id,
+    author_participant_id: me.id,
+    question_type: q.question_type,
+    text: q.text,
+    options: q.options,
+    correct_index: q.correct_index,
+    time_limit_sec: q.time_limit_sec || null,
+  }));
+
+  const { data, error } = await supabase
+    .from("quiz_questions")
+    .insert(payload)
+    .select();
+  if (error) {
+    questionErrorEl.textContent = "Eklenemedi: " + error.message;
+    return;
+  }
+
+  questions = questions.concat(data || []);
+  syncMyQuestions();
+  renderQuestions();
+  if (bulkInputEl) bulkInputEl.value = "";
+}
+
 async function deleteQuestion(questionId) {
   if (!currentRoom || !me) return;
   const { error } = await supabase
@@ -1185,6 +1390,7 @@ async function startQuiz() {
   currentRoom = data;
   hasAnsweredCurrent = false;
   renderRoom();
+  playTone({ freq: 520, slideTo: 880, durationMs: 300, type: "sawtooth", gain: 0.05 });
 }
 
 /** Host moves to the next question or finishes when out of questions. */
@@ -1239,6 +1445,8 @@ async function finishQuiz() {
   }
   currentRoom = data;
   renderRoom();
+  playTone({ freq: 660, durationMs: 200, type: "triangle", gain: 0.05 });
+  setTimeout(() => playTone({ freq: 880, durationMs: 200, type: "triangle", gain: 0.05 }), 180);
 }
 
 /** Host resets room to collecting state but keeps questions. */
@@ -1291,6 +1499,10 @@ async function resetToCollecting() {
 // =============================================================
 /** Render the currently active question in play mode. */
 function renderCurrentQuestion(opts = {}) {
+  if (playScoreboardEl) {
+    playScoreboardEl.classList.add("hidden");
+    playScoreboardEl.innerHTML = "";
+  }
   const force = !!opts.force;
   if (!currentRoom || !currentRoom.question_order || currentRoom.question_order.length === 0) {
     playQuestionTextEl.textContent = currentLang === "tr" ? "Sorular yükleniyor..." : "Loading questions...";
@@ -1324,7 +1536,12 @@ function renderCurrentQuestion(opts = {}) {
   activeQuestionId = questionId;
   hasAnsweredCurrent = false;
   revealMode = false;
+  myLastAnswerCorrect = null;
   answerFeedbackEl.textContent = "";
+  if (playScoreboardEl) {
+    playScoreboardEl.classList.add("hidden");
+    playScoreboardEl.innerHTML = "";
+  }
 
   const counterLabel = currentLang === "tr" ? "Soru" : "Question";
   playQuestionCounterEl.textContent = `${counterLabel} ${idx + 1}/${currentRoom.question_order.length}`;
@@ -1352,7 +1569,6 @@ function renderCurrentQuestion(opts = {}) {
 /** Start timer bar & countdown for a question. */
 function startTimer(limitSeconds) {
   stopTimer();
-  const timerCircleLabel = document.getElementById("timer-circle-label");
 
   function tick() {
     if (!questionStartedAtMs) return;
@@ -1360,17 +1576,9 @@ function startTimer(limitSeconds) {
     const elapsed = (Date.now() - questionStartedAtMs) / 1000;
     const remainingSec = Math.max(0, total - elapsed);
     timerDisplayEl.textContent = formatSeconds(remainingSec);
-    if (timerCircleLabel) {
-      timerCircleLabel.textContent = formatSeconds(remainingSec);
-    }
 
     const ratio = Math.max(0, Math.min(1, remainingSec / total));
     timerBarFill.style.width = `${ratio * 100}%`;
-    if (timerCircle) {
-      const deg = ratio * 360;
-      timerCircle.style.setProperty("--timer-progress", ratio);
-      timerCircle.style.background = `conic-gradient(var(--accent-color, #38bdf8) ${deg}deg, var(--card-bg, #111827) 0deg)`;
-    }
 
     if (remainingSec <= 0) {
       timerDisplayEl.textContent = "00:00";
@@ -1395,9 +1603,6 @@ function stopTimer() {
   }
   timerBarFill.style.width = "0%";
   timerDisplayEl.textContent = "--";
-  if (timerCircle) {
-    timerCircle.style.background = "conic-gradient(var(--accent-color, #38bdf8) 0deg, var(--card-bg, #111827) 0deg)";
-  }
 }
 
 function resetLocalPlayState() {
@@ -1422,6 +1627,7 @@ async function handleAnswerClick(answerIndex, btnEl) {
   if (!currentQuestion || !me || hasAnsweredCurrent) return;
 
   hasAnsweredCurrent = true;
+  playTone({ freq: 540, durationMs: 80, type: "square", gain: 0.04 });
 
   const buttons = playOptionsEl.querySelectorAll("button");
   buttons.forEach((b) => {
@@ -1437,6 +1643,8 @@ async function handleAnswerClick(answerIndex, btnEl) {
     is_correct: answerIndex === currentQuestion.correct_index,
   });
 
+  myLastAnswerCorrect = answerIndex === currentQuestion.correct_index;
+
   if (error) {
     answerFeedbackEl.textContent = "Cevap kaydedilemedi: " + error.message;
     logError("handleAnswerClick", error);
@@ -1449,7 +1657,7 @@ async function handleAnswerClick(answerIndex, btnEl) {
       : "Answer saved, wait for the reveal.";
 }
 
-function revealCorrectAnswerForEveryone() {
+async function revealCorrectAnswerForEveryone() {
   if (!currentQuestion) return;
   const buttons = playOptionsEl.querySelectorAll(".option-btn");
   buttons.forEach((btn, idx) => {
@@ -1463,6 +1671,124 @@ function revealCorrectAnswerForEveryone() {
     currentLang === "tr"
       ? `Doğru cevap: ${letter}`
       : `Correct answer: ${letter}`;
+
+  await showPostQuestionScoreboard();
+
+  if (myLastAnswerCorrect === true) {
+    playTone({ freq: 880, slideTo: 960, durationMs: 220, type: "triangle", gain: 0.05 });
+  } else if (myLastAnswerCorrect === false) {
+    playTone({ freq: 200, durationMs: 180, type: "sine", gain: 0.05 });
+  }
+}
+
+async function fetchAnswersForQuestions(questionIds) {
+  if (!questionIds || !questionIds.length) return [];
+  const { data, error } = await supabase
+    .from("quiz_answers")
+    .select("participant_id,is_correct,question_id")
+    .in("question_id", questionIds);
+  if (error) {
+    console.error("fetchAnswersForQuestions", error.message);
+    return [];
+  }
+  return data || [];
+}
+
+function buildScoreRows(questionIds, answers) {
+  const total = questionIds.length || 1;
+  const idsSet = new Set(questionIds || []);
+  const rows = (participants || []).map((p) => ({
+    participant: p,
+    correct: 0,
+    wrong: 0,
+    unanswered: total,
+  }));
+  const map = new Map(rows.map((r) => [r.participant.id, r]));
+  (answers || []).forEach((a) => {
+    if (!idsSet.has(a.question_id)) return;
+    const row = map.get(a.participant_id);
+    if (!row) return;
+    if (a.is_correct) row.correct += 1;
+    else row.wrong += 1;
+    row.unanswered = Math.max(0, total - (row.correct + row.wrong));
+  });
+  return rows.sort((a, b) => {
+    if (b.correct !== a.correct) return b.correct - a.correct;
+    return a.wrong - b.wrong;
+  });
+}
+
+function renderScoreboardSection(title, questionIds, answers) {
+  const section = document.createElement("div");
+  section.className = "scoreboard-section";
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+  section.appendChild(heading);
+
+  const rows = buildScoreRows(questionIds, answers);
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = currentLang === "tr" ? "Oyuncu yok." : "No players yet.";
+    section.appendChild(empty);
+    return section;
+  }
+
+  rows.forEach((row) => {
+    const rowEl = document.createElement("div");
+    rowEl.className = "score-row";
+    const name = document.createElement("div");
+    name.className = "score-name";
+    name.textContent = row.participant.name;
+    const stats = document.createElement("div");
+    stats.className = "score-stats";
+
+    if (questionIds.length === 1) {
+      let badge = "—";
+      if (row.correct > 0) badge = "✅";
+      else if (row.wrong > 0) badge = "❌";
+      stats.textContent = badge;
+    } else {
+      const corrLabel = currentLang === "tr" ? "Doğru" : "Correct";
+      const wrongLabel = currentLang === "tr" ? "Yanlış" : "Wrong";
+      const unLabel = currentLang === "tr" ? "Cevapsız" : "Unanswered";
+      stats.textContent = `${corrLabel}: ${row.correct} · ${wrongLabel}: ${row.wrong} · ${unLabel}: ${row.unanswered}`;
+    }
+
+    rowEl.appendChild(name);
+    rowEl.appendChild(stats);
+    section.appendChild(rowEl);
+  });
+
+  return section;
+}
+
+async function showPostQuestionScoreboard() {
+  if (!currentRoom || !currentRoom.question_order || !playScoreboardEl) return;
+  const idx = currentRoom.current_question_index || 0;
+  const currentQuestionId = currentRoom.question_order[idx];
+  if (!currentQuestionId) return;
+
+  if (!participants.length) {
+    await fetchParticipants(currentRoom.id);
+  }
+  const questionIdsSoFar = currentRoom.question_order.slice(0, idx + 1);
+
+  const [currentAnswers, overallAnswers] = await Promise.all([
+    fetchAnswersForQuestions([currentQuestionId]),
+    fetchAnswersForQuestions(questionIdsSoFar),
+  ]);
+
+  playScoreboardEl.innerHTML = "";
+  const questionTitle = currentLang === "tr" ? "Bu soru" : "This question";
+  const overallTitle = currentLang === "tr" ? "Genel durum" : "Overall so far";
+  playScoreboardEl.appendChild(
+    renderScoreboardSection(questionTitle, [currentQuestionId], currentAnswers)
+  );
+  playScoreboardEl.appendChild(
+    renderScoreboardSection(overallTitle, questionIdsSoFar, overallAnswers)
+  );
+  playScoreboardEl.classList.remove("hidden");
 }
 
 // =============================================================
@@ -1615,6 +1941,7 @@ function init() {
   ensureProfile();
   ensureStats();
   setupAvatarOptions();
+  updateSoundToggle();
   autoJoinFromUrl();
 }
 
