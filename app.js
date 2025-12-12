@@ -35,10 +35,15 @@ let confettiPlayed = false;
 let revealMode = false;
 let questionStartedAtMs = null;
 let resultsRendered = false;
+let activeQuestionId = null;
 let currentLang = localStorage.getItem(LS_LANG) || "tr";
 let currentTheme = localStorage.getItem(LS_THEME) || "dark";
 let profileData = null;
 let statsData = null;
+let questionsFetchTimer = null;
+let syncInterval = null;
+let lastQuestionsCount = null;
+let lastRoomHash = null;
 
 const textMap = {
   tr: {
@@ -543,6 +548,16 @@ async function fetchRoomBySlug(slug) {
   return data || null;
 }
 
+async function fetchRoomById(roomId) {
+  const { data, error } = await supabase
+    .from("quiz_rooms")
+    .select("*")
+    .eq("id", roomId)
+    .maybeSingle();
+  logError("fetchRoomById", error);
+  return data || null;
+}
+
 async function fetchParticipants(roomId) {
   const { data, error } = await supabase
     .from("quiz_participants")
@@ -587,6 +602,11 @@ async function fetchQuestions(roomId) {
   }
 }
 
+function scheduleFetchQuestions(roomId) {
+  if (questionsFetchTimer) clearTimeout(questionsFetchTimer);
+  questionsFetchTimer = setTimeout(() => fetchQuestions(roomId), 150);
+}
+
 function syncMyQuestions() {
   if (!me) {
     myQuestions = [];
@@ -608,6 +628,30 @@ async function findExistingParticipant(roomId) {
   return data || null;
 }
 
+async function applyRoomState(roomRow, { forceQuestionRender = false } = {}) {
+  if (!roomRow) return;
+  const prevStatus = currentRoom?.status;
+  const prevIndex = currentRoom?.current_question_index;
+  const prevStartedAt = currentRoom?.current_question_started_at;
+
+  currentRoom = roomRow;
+  renderRoom();
+  renderPhaseViews();
+
+  if (currentRoom.status === "playing") {
+    await fetchQuestions(currentRoom.id);
+    const shouldForce =
+      forceQuestionRender ||
+      prevIndex !== currentRoom.current_question_index ||
+      prevStartedAt !== currentRoom.current_question_started_at;
+    renderCurrentQuestion({ force: shouldForce });
+  } else {
+    resetLocalPlayState();
+  }
+
+  lastRoomHash = computeRoomHash(currentRoom);
+}
+
 // =============================================================
 // Room enter/leave
 // =============================================================
@@ -616,7 +660,7 @@ async function findExistingParticipant(roomId) {
  * - Saves last room/name to localStorage for auto-rejoin
  * - Binds realtime listeners and fetches initial data
  */
-function enterRoom(room, participant) {
+async function enterRoom(room, participant) {
   currentRoom = room;
   me = participant;
   localStorage.setItem(LS_LAST_ROOM, room.slug);
@@ -634,7 +678,15 @@ function enterRoom(room, participant) {
   updateUrlForRoom(room.slug);
 
   attachRealtime(room.id);
-  renderRoom();
+  startSyncLoop(room.id);
+
+  const freshRoom = await fetchRoomById(room.id);
+  if (freshRoom) {
+    await applyRoomState(freshRoom, { forceQuestionRender: true });
+  } else {
+    renderRoom();
+    renderPhaseViews();
+  }
   fetchParticipants(room.id);
   fetchQuestions(room.id);
 }
@@ -645,6 +697,7 @@ function backToLobby() {
     supabase.removeChannel(roomChannel);
     roomChannel = null;
   }
+  stopSyncLoop();
   stopTimer();
   resetLocalPlayState();
   currentRoom = null;
@@ -706,7 +759,7 @@ async function createRoom() {
     (await insertParticipant(room.id, name, createErrorEl));
   if (!participant) return;
 
-  enterRoom(room, participant);
+  await enterRoom(room, participant);
 }
 
 /** Join an existing room by slug. */
@@ -735,7 +788,7 @@ async function joinRoom() {
   const participant = existing || (await insertParticipant(room.id, name, joinErrorEl));
   if (!participant) return;
 
-  enterRoom(room, participant);
+  await enterRoom(room, participant);
 }
 
 async function insertParticipant(roomId, name, errorEl) {
@@ -752,12 +805,76 @@ async function insertParticipant(roomId, name, errorEl) {
   return data;
 }
 
+function computeRoomHash(r) {
+  if (!r) return "";
+  return [
+    r.status || "",
+    r.current_question_index ?? "",
+    r.current_question_started_at || "",
+    Array.isArray(r.question_order) ? r.question_order.length : 0,
+  ].join("|");
+}
+
+async function fetchQuestionsCount(roomId) {
+  const { count, error } = await supabase
+    .from("quiz_questions")
+    .select("*", { count: "exact", head: true })
+    .eq("room_id", roomId);
+  if (error) return null;
+  return count ?? null;
+}
+
+function stopSyncLoop() {
+  if (syncInterval) {
+    clearInterval(syncInterval);
+    syncInterval = null;
+  }
+}
+
+function startSyncLoop(roomId) {
+  stopSyncLoop();
+  lastQuestionsCount = null;
+  lastRoomHash = computeRoomHash(currentRoom);
+  let lastCollectCheck = 0;
+  let lastPlayCheck = 0;
+
+  syncInterval = setInterval(async () => {
+    if (!currentRoom || currentRoom.id !== roomId) return;
+    const now = Date.now();
+
+    try {
+      if (currentRoom.status === "collecting") {
+        if (now - lastCollectCheck < 2000) return;
+        lastCollectCheck = now;
+        const c = await fetchQuestionsCount(roomId);
+        if (c !== null && c !== lastQuestionsCount) {
+          lastQuestionsCount = c;
+          await fetchQuestions(roomId);
+        }
+      } else if (currentRoom.status === "playing") {
+        if (now - lastPlayCheck < 1000) return;
+        lastPlayCheck = now;
+        const fresh = await fetchRoomById(roomId);
+        if (!fresh) return;
+        const h = computeRoomHash(fresh);
+        if (h !== lastRoomHash) {
+          lastRoomHash = h;
+          await applyRoomState(fresh, { forceQuestionRender: true });
+        }
+      }
+    } catch (err) {
+      console.error("syncLoop error", err);
+    }
+  }, 500);
+}
+
 // =============================================================
 // Realtime
 // =============================================================
 function attachRealtime(roomId) {
   if (roomChannel) {
     supabase.removeChannel(roomChannel);
+    stopSyncLoop();
   }
 
   roomChannel = supabase
@@ -765,23 +882,11 @@ function attachRealtime(roomId) {
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "quiz_rooms", filter: `id=eq.${roomId}` },
-      (payload) => {
+      async (payload) => {
         console.log("[RT rooms]", payload);
-        if (!payload.new) return;
-        currentRoom = payload.new;
-
-        renderRoom();
-        renderPhaseViews();
-
-        if (currentRoom.status === "playing") {
-          // Ensure we have the latest questions then render the active one
-          fetchQuestions(roomId);
-        } else if (
-          currentRoom.status === "collecting" ||
-          currentRoom.status === "finished"
-        ) {
-          resetLocalPlayState();
-        }
+        const fresh = await fetchRoomById(roomId);
+        if (!fresh) return;
+        await applyRoomState(fresh);
       }
     )
     .on(
@@ -797,7 +902,7 @@ function attachRealtime(roomId) {
       { event: "*", schema: "public", table: "quiz_questions", filter: `room_id=eq.${roomId}` },
       (payload) => {
         console.log("[RT questions]", payload);
-        fetchQuestions(roomId);
+        scheduleFetchQuestions(roomId);
       }
     )
     .subscribe();
@@ -865,6 +970,8 @@ function renderQuestions() {
     }
     myQuestionsListEl.appendChild(liMine);
   });
+
+  renderHostControls();
 }
 
 function renderRoom() {
@@ -1183,7 +1290,8 @@ async function resetToCollecting() {
 // Play view (participants)
 // =============================================================
 /** Render the currently active question in play mode. */
-function renderCurrentQuestion() {
+function renderCurrentQuestion(opts = {}) {
+  const force = !!opts.force;
   if (!currentRoom || !currentRoom.question_order || currentRoom.question_order.length === 0) {
     playQuestionTextEl.textContent = currentLang === "tr" ? "Sorular yükleniyor..." : "Loading questions...";
     playOptionsEl.innerHTML = "";
@@ -1209,6 +1317,11 @@ function renderCurrentQuestion() {
     return;
   }
 
+  if (activeQuestionId === questionId && !force) {
+    return;
+  }
+
+  activeQuestionId = questionId;
   hasAnsweredCurrent = false;
   revealMode = false;
   answerFeedbackEl.textContent = "";
@@ -1293,6 +1406,7 @@ function resetLocalPlayState() {
   questionEndTime = null;
   hasAnsweredCurrent = false;
   revealMode = false;
+  activeQuestionId = null;
   resultsRendered = false;
   stopTimer();
   answerFeedbackEl.textContent = "";
@@ -1460,7 +1574,7 @@ async function autoJoinFromUrl() {
     if (participant) {
       rejoinNoticeEl.textContent = `${participant.name} olarak odaya tekrar bağlanılıyor...`;
       rejoinNoticeEl.classList.remove("hidden");
-      enterRoom(room, participant);
+      await enterRoom(room, participant);
       return;
     }
 
