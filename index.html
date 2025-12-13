@@ -19,6 +19,7 @@
         <div class="header-actions">
           <div id="profile-chip" class="profile-chip" role="button"></div>
           <div class="toggle-row">
+            <button id="help-btn" class="chip-btn" type="button" data-i18n="help">❔</button>
             <button id="sound-toggle" class="chip-btn" type="button">🔊</button>
             <button id="theme-toggle" class="chip-btn" type="button">🌙</button>
             <div class="lang-switch">
@@ -91,6 +92,8 @@
           <div id="host-controls" class="host-controls"></div>
           <button id="back-to-lobby-btn" class="secondary small" data-i18n="backLobby">Lobiye Dön</button>
         </div>
+
+        <div id="context-hint" class="context-hint hidden"></div>
 
         <div class="room-main">
           <!-- SORU TOPLAMA -->
@@ -233,6 +236,16 @@
           </div>
         </div>
       </section>
+    </div>
+  </div>
+
+  <div id="help-modal" class="modal hidden">
+    <div class="modal-content help-modal-content">
+      <div class="modal-header">
+        <h3 data-i18n="howToPlayTitle">Nasıl oynanır</h3>
+        <button id="close-help" class="secondary small" type="button">×</button>
+      </div>
+      <div id="help-steps" class="help-steps"></div>
     </div>
   </div>
 

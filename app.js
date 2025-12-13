@@ -50,6 +50,12 @@ let soundEnabled = localStorage.getItem(LS_SOUND) !== "off";
 let myLastAnswerCorrect = null;
 const answerStateByQuestionId = new Map();
 const soundCooldowns = new Map();
+const timerCueFlagsByQuestionId = new Map();
+let overlayTimeout = null;
+let overlayInterval = null;
+let pendingQuestionRenderId = null;
+let overlayEl = null;
+let overlayMessageEl = null;
 
 const textMap = {
   tr: {
@@ -101,6 +107,23 @@ const textMap = {
     statusCollecting: "Soru toplanıyor",
     statusPlaying: "Quiz oynanıyor",
     statusFinished: "Tur tamamlandı",
+    help: "Yardım",
+    howToPlayTitle: "Nasıl oynanır?",
+    howToPlaySteps: [
+      "Oda oluştur ya da koda gir, ismini seç.",
+      "Soru toplarken sorularını ekle; host başlattığında kilitlenir.",
+      "Başlangıç geri sayımı (3-2-1) sonrası cevabını seç, gönderince kilitlenir.",
+      "Puanlar hız + doğruluğa göre; sonuçta sıralama ve rozetler.",
+      "Host Sonraki Soru/Bitir ile turu yönetir; oyuncular sadece cevaplar.",
+    ],
+    contextCollecting: "Sorularını ekle. Host hazır olunca başlatır.",
+    contextPlaying: "Bir cevap seç, gönderdikten sonra değiştiremezsin.",
+    contextFinished: "Tur bitti. Host yeni turu başlatabilir.",
+    startingIn: "Başlıyor:",
+    getReady: "Hazır ol!",
+    getReadyShort: "Sıradaki soru geliyor...",
+    tenSecondsLeft: "10 saniye kaldı!",
+    fiveSecondsLeft: "5 saniye kaldı!",
   },
   en: {
     title: "Collaborative Quiz · Focus Arena",
@@ -149,6 +172,23 @@ const textMap = {
     statusCollecting: "Collecting questions",
     statusPlaying: "Quiz in progress",
     statusFinished: "Round finished",
+    help: "Help",
+    howToPlayTitle: "How to play",
+    howToPlaySteps: [
+      "Create a room or join with the code, pick a name.",
+      "During collection add your questions; once the host starts they lock.",
+      "After the 3-2-1 start, pick one option. Submissions can't be changed.",
+      "Points reward speed + accuracy; scoreboard and badges show at the end.",
+      "Host controls Next/Finish; players only submit answers.",
+    ],
+    contextCollecting: "Add your questions below. Host starts when ready.",
+    contextPlaying: "Choose one answer. You can't change after submitting.",
+    contextFinished: "Round ended. Host can start a new round.",
+    startingIn: "Starting in:",
+    getReady: "Get ready!",
+    getReadyShort: "Next question loading...",
+    tenSecondsLeft: "10 seconds left!",
+    fiveSecondsLeft: "5 seconds left!",
   },
 };
 
@@ -268,10 +308,87 @@ async function playSound(type) {
   }
 }
 
+function ensureOverlayElement() {
+  if (overlayEl) return;
+  overlayEl = document.createElement("div");
+  overlayEl.id = "ui-overlay";
+  overlayEl.className = "ui-overlay hidden";
+  const card = document.createElement("div");
+  card.className = "overlay-card";
+  overlayMessageEl = document.createElement("div");
+  card.appendChild(overlayMessageEl);
+  overlayEl.appendChild(card);
+  document.body.appendChild(overlayEl);
+}
+
+function hideOverlay() {
+  if (overlayTimeout) clearTimeout(overlayTimeout);
+  if (overlayInterval) clearInterval(overlayInterval);
+  overlayTimeout = null;
+  overlayInterval = null;
+  if (overlayEl) overlayEl.classList.add("hidden");
+}
+
+function showOverlay(message, durationMs = 1500) {
+  ensureOverlayElement();
+  hideOverlay();
+  overlayMessageEl.textContent = message;
+  overlayEl.classList.remove("hidden");
+  overlayTimeout = setTimeout(hideOverlay, durationMs);
+}
+
+function showCountdownOverlay(callback) {
+  ensureOverlayElement();
+  hideOverlay();
+  let count = 3;
+  overlayEl.classList.remove("hidden");
+  overlayMessageEl.textContent = `${t("startingIn")} ${count}...`;
+  overlayInterval = setInterval(() => {
+    count -= 1;
+    if (count > 0) {
+      overlayMessageEl.textContent = `${t("startingIn")} ${count}...`;
+    } else {
+      clearInterval(overlayInterval);
+      overlayInterval = null;
+      overlayMessageEl.textContent = t("getReady");
+      overlayTimeout = setTimeout(() => {
+        hideOverlay();
+        callback?.();
+      }, 600);
+    }
+  }, 700);
+}
+
 function updateSoundToggle() {
   if (!soundToggle) return;
   soundToggle.textContent = soundEnabled ? "🔊" : "🔇";
   soundToggle.setAttribute("aria-pressed", soundEnabled ? "true" : "false");
+}
+
+function setTimerCue(message, strength = "soft") {
+  if (!timerCueEl) return;
+  timerCueEl.textContent = message;
+  timerCueEl.classList.add("visible");
+  timerBarFill.classList.remove("timer-pulse-soft", "timer-pulse-strong");
+  if (strength === "hard") {
+    timerBarFill.classList.add("timer-pulse-strong");
+  } else {
+    timerBarFill.classList.add("timer-pulse-soft");
+  }
+}
+
+function clearTimerCue() {
+  if (timerCueEl) timerCueEl.classList.remove("visible");
+  timerBarFill.classList.remove("timer-pulse-soft", "timer-pulse-strong");
+  timerDisplayEl.classList.remove("timer-shake");
+}
+
+function showBigCountdown(num) {
+  if (!timerBigCountdownEl) return;
+  timerBigCountdownEl.textContent = num;
+  timerBigCountdownEl.classList.remove("countdown-pop");
+  void timerBigCountdownEl.offsetWidth;
+  timerBigCountdownEl.classList.add("countdown-pop");
 }
 
 async function toggleSound() {
@@ -322,6 +439,8 @@ function applyLanguage() {
 
   langTrBtn.classList.toggle("active", currentLang === "tr");
   langEnBtn.classList.toggle("active", currentLang === "en");
+
+  renderHelpSteps();
 }
 
 function toggleTheme() {
@@ -349,6 +468,42 @@ function ensureProfile() {
     localStorage.setItem(LS_PROFILE, JSON.stringify(profileData));
   }
   renderProfileChip();
+}
+
+function updateContextHint() {
+  if (!contextHintEl || !currentRoom) return;
+  let text = "";
+  if (currentRoom.status === "collecting") text = t("contextCollecting");
+  else if (currentRoom.status === "playing") text = t("contextPlaying");
+  else if (currentRoom.status === "finished") text = t("contextFinished");
+
+  if (text) {
+    contextHintEl.textContent = text;
+    contextHintEl.classList.remove("hidden");
+  } else {
+    contextHintEl.classList.add("hidden");
+  }
+}
+
+function renderHelpSteps() {
+  if (!helpStepsEl) return;
+  const steps = textMap[currentLang]?.howToPlaySteps || [];
+  helpStepsEl.innerHTML = "";
+  steps.forEach((step) => {
+    const p = document.createElement("p");
+    p.textContent = step;
+    helpStepsEl.appendChild(p);
+  });
+}
+
+function openHelpModal() {
+  if (!helpModal) return;
+  renderHelpSteps();
+  helpModal.classList.remove("hidden");
+}
+
+function closeHelpModal() {
+  if (helpModal) helpModal.classList.add("hidden");
 }
 
 function renderProfileChip() {
@@ -548,11 +703,13 @@ const participantsListEl = document.getElementById("participants-list");
 const hostControlsEl = document.getElementById("host-controls");
 const backToLobbyBtn = document.getElementById("back-to-lobby-btn");
 const profileChip = document.getElementById("profile-chip");
+const helpBtn = document.getElementById("help-btn");
 const themeToggle = document.getElementById("theme-toggle");
 const soundToggle = document.getElementById("sound-toggle");
 const langTrBtn = document.getElementById("lang-tr");
 const langEnBtn = document.getElementById("lang-en");
 const playerStatsChip = document.getElementById("player-stats-chip");
+const contextHintEl = document.getElementById("context-hint");
 
 const collectView = document.getElementById("collect-view");
 const playView = document.getElementById("play-view");
@@ -582,6 +739,7 @@ const myQuestionsListEl = document.getElementById("my-questions-list");
 const roomQuestionsListEl = document.getElementById("room-questions-list");
 
 const playQuestionCounterEl = document.getElementById("play-question-counter");
+const timerWrapper = document.getElementById("timer-wrapper");
 const timerBarFill = document.getElementById("timer-bar-fill");
 const timerDisplayEl = document.getElementById("timer-display");
 const timerCircle = document.getElementById("timer-circle");
@@ -589,6 +747,14 @@ const playQuestionTextEl = document.getElementById("play-question-text");
 const playOptionsEl = document.getElementById("play-options");
 const answerFeedbackEl = document.getElementById("answer-feedback");
 const playScoreboardEl = document.getElementById("play-scoreboard");
+const timerCueEl = document.createElement("div");
+timerCueEl.id = "timer-cue";
+const timerBigCountdownEl = document.createElement("div");
+timerBigCountdownEl.id = "timer-big-countdown";
+if (timerWrapper) {
+  timerWrapper.appendChild(timerCueEl);
+  timerWrapper.appendChild(timerBigCountdownEl);
+}
 
 const resultsSummaryEl = document.getElementById("results-summary");
 const resultsListEl = document.getElementById("results-list");
@@ -600,6 +766,9 @@ const avatarOptionsEl = document.getElementById("avatar-options");
 const colorOptionsEl = document.getElementById("color-options");
 const closeAvatarBtn = document.getElementById("close-avatar");
 const saveAvatarBtn = document.getElementById("save-avatar");
+const helpModal = document.getElementById("help-modal");
+const helpStepsEl = document.getElementById("help-steps");
+const closeHelpBtn = document.getElementById("close-help");
 
 // =============================================================
 // Event listeners
@@ -609,6 +778,11 @@ joinRoomBtn.addEventListener("click", joinRoom);
 backToLobbyBtn.addEventListener("click", backToLobby);
 addQuestionBtn.addEventListener("click", addQuestion);
 bulkImportBtn.addEventListener("click", bulkImportQuestions);
+helpBtn?.addEventListener("click", openHelpModal);
+closeHelpBtn?.addEventListener("click", closeHelpModal);
+helpModal?.addEventListener("click", (e) => {
+  if (e.target === helpModal) closeHelpModal();
+});
 document.getElementById("new-question-btn").addEventListener("click", () => {
   questionTextInput.value = "";
   optionAInput.value = "";
@@ -766,6 +940,7 @@ async function applyRoomState(roomRow, { forceQuestionRender = false } = {}) {
   const prevStatus = currentRoom?.status;
   const prevIndex = currentRoom?.current_question_index;
   const prevStartedAt = currentRoom?.current_question_started_at;
+  const enteringPlaying = prevStatus === "collecting" && roomRow.status === "playing";
 
   currentRoom = roomRow;
   renderRoom();
@@ -777,7 +952,11 @@ async function applyRoomState(roomRow, { forceQuestionRender = false } = {}) {
       forceQuestionRender ||
       prevIndex !== currentRoom.current_question_index ||
       prevStartedAt !== currentRoom.current_question_started_at;
-    renderCurrentQuestion({ force: shouldForce });
+    if (enteringPlaying) {
+      showCountdownOverlay(() => renderCurrentQuestion({ force: true, skipOverlay: true }));
+    } else {
+      renderCurrentQuestion({ force: shouldForce });
+    }
   } else {
     resetLocalPlayState();
   }
@@ -1142,6 +1321,7 @@ function renderRoom() {
 
   renderHostControls();
   renderPhaseViews();
+  updateContextHint();
 }
 
 function renderHostControls() {
@@ -1195,7 +1375,9 @@ function renderPhaseViews() {
     playView.classList.remove("hidden");
     resultsView.classList.add("hidden");
     resultsRendered = false;
-    renderCurrentQuestion({ force: true });
+    if (activeQuestionId) {
+      renderCurrentQuestion({ force: true });
+    }
   } else if (currentRoom.status === "finished") {
     collectView.classList.add("hidden");
     playView.classList.add("hidden");
@@ -1653,9 +1835,27 @@ function renderCurrentQuestion(opts = {}) {
   }
 
   const isNewQuestion = activeQuestionId !== questionId;
+
+  if (isNewQuestion && !opts.skipOverlay) {
+    if (pendingQuestionRenderId === questionId) return;
+    pendingQuestionRenderId = questionId;
+    showOverlay(t("getReady"), 1500);
+    setTimeout(() => {
+      pendingQuestionRenderId = null;
+      renderCurrentQuestion({ ...opts, skipOverlay: true, force: true });
+    }, 1500);
+    return;
+  }
+  pendingQuestionRenderId = null;
   activeQuestionId = questionId;
   revealMode = false;
   myLastAnswerCorrect = null;
+  timerCueFlagsByQuestionId.set(questionId, {
+    ten: false,
+    five: false,
+    finals: new Set(),
+  });
+  clearTimerCue();
   if (isNewQuestion) {
     hasAnsweredCurrent = answerStateByQuestionId.has(questionId);
     if (!hasAnsweredCurrent) {
@@ -1676,6 +1876,7 @@ function renderCurrentQuestion(opts = {}) {
     const btn = document.createElement("button");
     btn.className = "option-btn";
     const letter = String.fromCharCode("A".charCodeAt(0) + i);
+    btn.classList.add(`option-${letter.toLowerCase()}`);
     btn.innerHTML = `<span class="option-letter">${letter}</span><span>${optText}</span>`;
     btn.onclick = () => handleAnswerClick(i, btn);
     playOptionsEl.appendChild(btn);
@@ -1695,6 +1896,8 @@ function renderCurrentQuestion(opts = {}) {
 function startTimer(limitSeconds) {
   stopTimer();
   let lastBeep = null;
+  clearTimerCue();
+  if (timerBigCountdownEl) timerBigCountdownEl.textContent = "";
 
   function tick() {
     if (!questionStartedAtMs) return;
@@ -1706,7 +1909,35 @@ function startTimer(limitSeconds) {
     const ratio = Math.max(0, Math.min(1, remainingSec / total));
     timerBarFill.style.width = `${ratio * 100}%`;
 
+    const cueFlags =
+      timerCueFlagsByQuestionId.get(activeQuestionId) || {
+        ten: false,
+        five: false,
+        finals: new Set(),
+      };
+
+    if (remainingSec <= 10 && !cueFlags.ten) {
+      cueFlags.ten = true;
+      setTimerCue(t("tenSecondsLeft"), "soft");
+    }
+
     const rounded = Math.ceil(remainingSec);
+    if (rounded <= 5 && !cueFlags.five) {
+      cueFlags.five = true;
+      setTimerCue(t("fiveSecondsLeft"), "hard");
+      timerDisplayEl.classList.add("timer-shake");
+      setTimeout(() => timerDisplayEl.classList.remove("timer-shake"), 700);
+    }
+
+    if (rounded <= 3) {
+      cueFlags.finals = cueFlags.finals || new Set();
+      if (!cueFlags.finals.has(rounded)) {
+        cueFlags.finals.add(rounded);
+        showBigCountdown(rounded);
+      }
+    }
+    timerCueFlagsByQuestionId.set(activeQuestionId, cueFlags);
+
     if (rounded <= 5 && rounded !== lastBeep) {
       lastBeep = rounded;
       playSound("countdown");
@@ -1717,6 +1948,8 @@ function startTimer(limitSeconds) {
       timerBarFill.style.width = "0%";
       clearInterval(timerInterval);
       timerInterval = null;
+      clearTimerCue();
+      if (timerBigCountdownEl) timerBigCountdownEl.textContent = "";
       if (!revealMode) {
         revealMode = true;
         revealCorrectAnswerForEveryone();
@@ -1735,6 +1968,8 @@ function stopTimer() {
   }
   timerBarFill.style.width = "0%";
   timerDisplayEl.textContent = "--";
+  clearTimerCue();
+  if (timerBigCountdownEl) timerBigCountdownEl.textContent = "";
 }
 
 function resetLocalPlayState() {
@@ -1744,8 +1979,10 @@ function resetLocalPlayState() {
   hasAnsweredCurrent = false;
   revealMode = false;
   activeQuestionId = null;
+  pendingQuestionRenderId = null;
   resultsRendered = false;
   answerStateByQuestionId.clear();
+  timerCueFlagsByQuestionId.clear();
   stopTimer();
   answerFeedbackEl.textContent = "";
   playQuestionTextEl.textContent = "";
