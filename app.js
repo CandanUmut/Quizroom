@@ -16,6 +16,7 @@ const LS_THEME = "quiz_theme";
 const LS_PROFILE = "quiz_profile";
 const LS_STATS = "quiz_stats";
 const LS_SOUND = "quiz_sound";
+const READY_BUFFER_SEC = 2;
 
 // =============================================================
 // Global state & helpers
@@ -1902,7 +1903,8 @@ function startTimer(limitSeconds) {
   function tick() {
     if (!questionStartedAtMs) return;
     const total = limitSeconds;
-    const elapsed = (Date.now() - questionStartedAtMs) / 1000;
+    const elapsedRaw = (Date.now() - questionStartedAtMs) / 1000;
+    const elapsed = Math.max(0, elapsedRaw - READY_BUFFER_SEC);
     const remainingSec = Math.max(0, total - elapsed);
     timerDisplayEl.textContent = formatSeconds(remainingSec);
 
@@ -2093,8 +2095,8 @@ async function handleAnswerClick(answerIndex, btnEl) {
   applyAnswerStateToUI(qid);
   answerFeedbackEl.textContent =
     currentLang === "tr"
-      ? "Cevabın kaydedildi, doğru cevap açıklanıncaya kadar bekle."
-      : "Answer saved, wait for the reveal.";
+      ? "✅ Cevabın kaydedildi, doğru cevap açıklanıncaya kadar bekle."
+      : "✅ Answer saved, wait for the reveal.";
   playSound("submit");
 }
 
