@@ -30,7 +30,6 @@ let roomChannel = null;
 let timerInterval = null;
 let currentQuestion = null;
 let questionEndTime = null;
-let effectiveQuestionStartMs = null;
 let hasAnsweredCurrent = false;
 let confettiTimeout = null;
 let confettiPlayed = false;
@@ -50,7 +49,6 @@ let audioCtx = null;
 let soundEnabled = localStorage.getItem(LS_SOUND) !== "off";
 let myLastAnswerCorrect = null;
 const answerStateByQuestionId = new Map();
-const answeredMap = new Map();
 const soundCooldowns = new Map();
 const timerCueFlagsByQuestionId = new Map();
 let overlayTimeout = null;
@@ -58,8 +56,6 @@ let overlayInterval = null;
 let pendingQuestionRenderId = null;
 let overlayEl = null;
 let overlayMessageEl = null;
-let readyShownForQuestionId = null;
-const READY_BUFFER_MS = 2500;
 
 const textMap = {
   tr: {
@@ -1843,12 +1839,11 @@ function renderCurrentQuestion(opts = {}) {
   if (isNewQuestion && !opts.skipOverlay) {
     if (pendingQuestionRenderId === questionId) return;
     pendingQuestionRenderId = questionId;
-    readyShownForQuestionId = questionId;
-    showOverlay(t("getReady"), READY_BUFFER_MS);
+    showOverlay(t("getReady"), 1500);
     setTimeout(() => {
       pendingQuestionRenderId = null;
       renderCurrentQuestion({ ...opts, skipOverlay: true, force: true });
-    }, READY_BUFFER_MS);
+    }, 1500);
     return;
   }
   pendingQuestionRenderId = null;
@@ -1880,7 +1875,6 @@ function renderCurrentQuestion(opts = {}) {
   (currentQuestion.options || []).forEach((optText, i) => {
     const btn = document.createElement("button");
     btn.className = "option-btn";
-    btn.dataset.variant = String(i % 4);
     const letter = String.fromCharCode("A".charCodeAt(0) + i);
     btn.classList.add(`option-${letter.toLowerCase()}`);
     btn.innerHTML = `<span class="option-letter">${letter}</span><span>${optText}</span>`;
@@ -1892,25 +1886,23 @@ function renderCurrentQuestion(opts = {}) {
   questionStartedAtMs = currentRoom.current_question_started_at
     ? new Date(currentRoom.current_question_started_at).getTime()
     : Date.now();
-  effectiveQuestionStartMs = questionStartedAtMs + READY_BUFFER_MS;
-  questionEndTime = effectiveQuestionStartMs + limit * 1000;
+  questionEndTime = questionStartedAtMs + limit * 1000;
 
-  startTimer(limit, effectiveQuestionStartMs);
-  await hydrateExistingAnswer(questionId);
-  applyAnsweredUI(questionId);
+  startTimer(limit);
+  applyAnswerStateToUI(questionId);
 }
 
 /** Start timer bar & countdown for a question. */
-function startTimer(limitSeconds, startAtMs) {
+function startTimer(limitSeconds) {
   stopTimer();
   let lastBeep = null;
   clearTimerCue();
   if (timerBigCountdownEl) timerBigCountdownEl.textContent = "";
 
   function tick() {
-    if (!startAtMs) return;
+    if (!questionStartedAtMs) return;
     const total = limitSeconds;
-    const elapsed = (Date.now() - startAtMs) / 1000;
+    const elapsed = (Date.now() - questionStartedAtMs) / 1000;
     const remainingSec = Math.max(0, total - elapsed);
     timerDisplayEl.textContent = formatSeconds(remainingSec);
 
@@ -1983,7 +1975,6 @@ function stopTimer() {
 function resetLocalPlayState() {
   currentQuestion = null;
   questionStartedAtMs = null;
-  effectiveQuestionStartMs = null;
   questionEndTime = null;
   hasAnsweredCurrent = false;
   revealMode = false;
@@ -1991,7 +1982,6 @@ function resetLocalPlayState() {
   pendingQuestionRenderId = null;
   resultsRendered = false;
   answerStateByQuestionId.clear();
-  answeredMap.clear();
   timerCueFlagsByQuestionId.clear();
   stopTimer();
   answerFeedbackEl.textContent = "";
@@ -2002,61 +1992,32 @@ function resetLocalPlayState() {
   timerDisplayEl.textContent = "--";
 }
 
-// Apply saved/pending answer UI for a question
-function applyAnsweredUI(questionId) {
+function applyAnswerStateToUI(questionId) {
   if (!questionId) return;
-  const existing = answeredMap.get(questionId) || answerStateByQuestionId.get(questionId);
+  const state = answerStateByQuestionId.get(questionId);
   const buttons = playOptionsEl.querySelectorAll("button");
-  if (!existing) {
-    buttons.forEach((b) => {
-      b.classList.remove("selected");
-      b.disabled = false;
-    });
-    answerFeedbackEl.textContent = "";
+  if (!state) {
+    buttons.forEach((b) => b.classList.remove("selected"));
+    buttons.forEach((b) => (b.disabled = false));
     return;
   }
 
   buttons.forEach((b, idx) => {
     b.disabled = true;
-    b.classList.toggle("selected", idx === existing.answerIndex || idx === existing.selectedIndex);
+    b.classList.toggle("selected", idx === state.selectedIndex);
   });
-
-  if (existing.status === "pending") {
-    answerFeedbackEl.textContent = currentLang === "tr" ? "Kaydediliyor..." : "Saving...";
+  if (state.status === "pending") {
+    answerFeedbackEl.textContent = currentLang === "tr" ? "Gönderiliyor..." : "Submitting...";
   } else {
-    answerFeedbackEl.textContent =
-      currentLang === "tr" ? "✅ Cevabın kaydedildi" : "✅ Answer submitted";
+    answerFeedbackEl.textContent = currentLang === "tr" ? "Gönderildi ✅" : "Submitted ✅";
   }
-}
-
-function applyAnswerStateToUI(questionId) {
-  applyAnsweredUI(questionId);
-}
-
-// Fetch player's answer for a question to restore state on refresh
-async function hydrateExistingAnswer(questionId) {
-  if (!me || !questionId || answeredMap.has(questionId)) return;
-  const { data, error } = await supabase
-    .from("quiz_answers")
-    .select("answer_index")
-    .eq("question_id", questionId)
-    .eq("participant_id", me.id)
-    .maybeSingle();
-  if (error || !data) return;
-  answeredMap.set(questionId, {
-    answerIndex: data.answer_index,
-    status: "saved",
-  });
 }
 
 /** Persist an answer for the current player and show quick feedback. */
 async function handleAnswerClick(answerIndex, btnEl) {
   if (!currentQuestion || !me) return;
   const qid = currentQuestion.id;
-  if (answeredMap.has(qid)) {
-    applyAnsweredUI(qid);
-    return;
-  }
+  if (answerStateByQuestionId.has(qid)) return;
 
   hasAnsweredCurrent = true;
   playSound("click");
@@ -2069,18 +2030,19 @@ async function handleAnswerClick(answerIndex, btnEl) {
   btnEl.classList.add("selected");
 
   const limit = currentQuestion.time_limit_sec || currentRoom.default_time_limit_sec || 20;
-  const startBase = effectiveQuestionStartMs || questionStartedAtMs || Date.now();
-  const answerMs = Math.max(0, Date.now() - startBase);
+  const answerMs = Math.max(0, Date.now() - (questionStartedAtMs || Date.now()));
   const ratio = clamp(1 - answerMs / (limit * 1000), 0, 1);
   const isCorrect = answerIndex === currentQuestion.correct_index;
   const points = isCorrect ? 1000 + Math.floor(1000 * ratio) : 0;
 
-  answeredMap.set(qid, {
-    answerIndex,
+  answerStateByQuestionId.set(qid, {
+    selectedIndex: answerIndex,
     status: "pending",
     answeredAt: Date.now(),
+    answerMs,
+    points,
   });
-  applyAnsweredUI(qid);
+  applyAnswerStateToUI(qid);
 
   const { error } = await supabase.from("quiz_answers").insert({
     question_id: qid,
@@ -2103,30 +2065,32 @@ async function handleAnswerClick(answerIndex, btnEl) {
         .eq("participant_id", me.id)
         .maybeSingle();
       const recoveredIndex = existing?.answer_index ?? answerIndex;
-      answeredMap.set(qid, {
-        answerIndex: recoveredIndex,
-        status: "already",
+      answerStateByQuestionId.set(qid, {
+        selectedIndex: recoveredIndex,
+        status: "saved",
         answeredAt: Date.now(),
+        answerMs: existing?.answer_ms ?? answerMs,
+        points: existing?.points ?? points,
       });
-      applyAnsweredUI(qid);
-      answerFeedbackEl.textContent = currentLang === "tr" ? "✅ Zaten gönderdin" : "✅ Already submitted";
+      applyAnswerStateToUI(qid);
+      answerFeedbackEl.textContent = currentLang === "tr" ? "Zaten gönderdin ✅" : "Already submitted ✅";
       return;
     }
-    answeredMap.delete(qid);
-    buttons.forEach((b) => (b.disabled = false));
     answerFeedbackEl.textContent =
       currentLang === "tr"
-        ? "Cevap kaydedilemedi, tekrar dene."
-        : "Could not save, please retry.";
+        ? "Cevap kaydedilemedi: " + (error.message || "")
+        : "Could not save answer: " + (error.message || "");
     return;
   }
 
-  answeredMap.set(qid, {
-    answerIndex,
+  answerStateByQuestionId.set(qid, {
+    selectedIndex: answerIndex,
     status: "saved",
     answeredAt: Date.now(),
+    answerMs,
+    points,
   });
-  applyAnsweredUI(qid);
+  applyAnswerStateToUI(qid);
   answerFeedbackEl.textContent =
     currentLang === "tr"
       ? "Cevabın kaydedildi, doğru cevap açıklanıncaya kadar bekle."
