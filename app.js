@@ -17,6 +17,8 @@ const LS_PROFILE = "quiz_profile";
 const LS_STATS = "quiz_stats";
 const LS_SOUND = "quiz_sound";
 const READY_BUFFER_SEC = 2;
+const LEADERBOARD_REVEAL_MS = 4500;
+const LEADERBOARD_SHOW_LIMIT = 10;
 
 // =============================================================
 // Global state & helpers
@@ -57,6 +59,16 @@ let overlayInterval = null;
 let pendingQuestionRenderId = null;
 let overlayEl = null;
 let overlayMessageEl = null;
+let leaderboardRevealEl = null;
+let leaderboardRowsEl = null;
+let leaderboardMoreEl = null;
+let leaderboardCountdownEl = null;
+let leaderboardProgressEl = null;
+let leaderboardTimeout = null;
+let leaderboardCountdownInterval = null;
+let lastLeaderboardQuestionId = null;
+let prevLeaderboardSnapshot = new Map();
+let prefersReducedMotionQuery = null;
 
 const textMap = {
   tr: {
@@ -101,6 +113,8 @@ const textMap = {
     roomQuestionsHint: "Host en az 1 soru sonrası başlatabilir",
     results: "Sonuçlar",
     resultsHint: "Doğru cevap sayısına göre sıralama.",
+    leaderboardTitle: "Sıralama",
+    nextQuestionStarting: "Sonraki soru başlıyor...",
     statsTitle: "İstatistikler & Rozetler",
     statsHint: "Güncel oturumdan bağımsız olarak saklanır.",
     avatarTitle: "Avatar Seç",
@@ -166,6 +180,8 @@ const textMap = {
     roomQuestionsHint: "Host can start after at least one question",
     results: "Results",
     resultsHint: "Ranking by number of correct answers.",
+    leaderboardTitle: "Leaderboard",
+    nextQuestionStarting: "Next question starting...",
     statsTitle: "Stats & Badges",
     statsHint: "Stored beyond the current session.",
     avatarTitle: "Choose avatar",
@@ -301,6 +317,12 @@ async function playSound(type) {
       await playTone({ freq: 660, durationMs: 200, type: "triangle", gain: 0.05 });
       setTimeout(() => playTone({ freq: 880, durationMs: 200, type: "triangle", gain: 0.05 }), 160);
       break;
+    case "reveal":
+      await playTone({ freq: 520, slideTo: 360, durationMs: 320, type: "sawtooth", gain: 0.04 });
+      break;
+    case "rank-up":
+      await playTone({ freq: 880, slideTo: 1020, durationMs: 260, type: "triangle", gain: 0.05 });
+      break;
     case "countdown":
       await playTone({ freq: 480, durationMs: 90, type: "sine", gain: 0.04 });
       break;
@@ -358,6 +380,285 @@ function showCountdownOverlay(callback) {
       }, 600);
     }
   }, 700);
+}
+
+function shouldReduceMotion() {
+  if (!prefersReducedMotionQuery) {
+    prefersReducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+  }
+  return !!prefersReducedMotionQuery?.matches;
+}
+
+function ensureLeaderboardRevealElements() {
+  if (leaderboardRevealEl) return;
+  leaderboardRevealEl = document.createElement("div");
+  leaderboardRevealEl.id = "leaderboard-reveal";
+  leaderboardRevealEl.className = "leaderboard-reveal hidden";
+
+  const card = document.createElement("div");
+  card.className = "lb-card";
+
+  const header = document.createElement("div");
+  header.className = "lb-header";
+  const titleBlock = document.createElement("div");
+  const label = document.createElement("div");
+  label.className = "lb-label";
+  label.textContent = currentLang === "tr" ? "Tur güncellemesi" : "Round update";
+  const title = document.createElement("h3");
+  title.className = "lb-title";
+  title.textContent = t("leaderboardTitle");
+  titleBlock.appendChild(label);
+  titleBlock.appendChild(title);
+
+  const progress = document.createElement("div");
+  progress.className = "lb-progress";
+  leaderboardCountdownEl = document.createElement("div");
+  leaderboardCountdownEl.className = "lb-countdown";
+  leaderboardCountdownEl.textContent = t("nextQuestionStarting");
+  const progressBar = document.createElement("div");
+  progressBar.className = "lb-progress-bar";
+  leaderboardProgressEl = document.createElement("div");
+  leaderboardProgressEl.className = "lb-progress-fill";
+  progressBar.appendChild(leaderboardProgressEl);
+  progress.appendChild(leaderboardCountdownEl);
+  progress.appendChild(progressBar);
+
+  header.appendChild(titleBlock);
+  header.appendChild(progress);
+
+  leaderboardRowsEl = document.createElement("div");
+  leaderboardRowsEl.id = "leaderboard-rows";
+  leaderboardRowsEl.className = "lb-rows";
+
+  leaderboardMoreEl = document.createElement("div");
+  leaderboardMoreEl.id = "leaderboard-more";
+  leaderboardMoreEl.className = "lb-more hint hidden";
+
+  card.appendChild(header);
+  card.appendChild(leaderboardRowsEl);
+  card.appendChild(leaderboardMoreEl);
+  leaderboardRevealEl.appendChild(card);
+  document.body.appendChild(leaderboardRevealEl);
+}
+
+function hideLeaderboardReveal() {
+  if (leaderboardTimeout) clearTimeout(leaderboardTimeout);
+  if (leaderboardCountdownInterval) clearInterval(leaderboardCountdownInterval);
+  leaderboardTimeout = null;
+  leaderboardCountdownInterval = null;
+  if (leaderboardProgressEl) {
+    leaderboardProgressEl.style.transition = "none";
+    leaderboardProgressEl.style.width = "0%";
+  }
+  if (leaderboardRevealEl) {
+    leaderboardRevealEl.classList.add("hidden");
+    leaderboardRevealEl.classList.remove("show");
+  }
+}
+
+function animateScoreValue(el, from, to, duration = 900) {
+  if (!el) return;
+  const start = performance.now();
+  const diff = to - from;
+  function step(now) {
+    const progress = clamp((now - start) / duration, 0, 1);
+    const eased = shouldReduceMotion() ? progress : 1 - Math.pow(1 - progress, 3);
+    const val = Math.round(from + diff * eased);
+    el.textContent = val.toLocaleString();
+    if (progress < 1) requestAnimationFrame(step);
+  }
+  if (shouldReduceMotion() || diff === 0) {
+    el.textContent = to.toLocaleString();
+    return;
+  }
+  requestAnimationFrame(step);
+}
+
+function renderLeaderboardRows(rows = []) {
+  if (!leaderboardRowsEl) return;
+  const prevRects = new Map();
+  leaderboardRowsEl.querySelectorAll(".lb-row").forEach((el) => {
+    prevRects.set(el.dataset.id, el.getBoundingClientRect());
+  });
+
+  leaderboardRowsEl.innerHTML = "";
+
+  rows.forEach((row) => {
+    const rowEl = document.createElement("div");
+    rowEl.className = "lb-row";
+    rowEl.dataset.id = row.id;
+    rowEl.dataset.rank = row.rank;
+    rowEl.classList.add(`rank-${row.rank}`);
+    if (row.rank <= 3) rowEl.classList.add("lb-top");
+    if (row.movement === "up") rowEl.classList.add("lb-up");
+    else if (row.movement === "down") rowEl.classList.add("lb-down");
+
+    const rank = document.createElement("div");
+    rank.className = "lb-rank";
+    rank.textContent = `#${row.rank}`;
+
+    const body = document.createElement("div");
+    body.className = "lb-body";
+    const name = document.createElement("div");
+    name.className = "lb-name";
+    name.textContent = row.name;
+    const delta = document.createElement("div");
+    delta.className = "lb-delta";
+    const deltaVal = row.delta || 0;
+    if (deltaVal > 0) {
+      delta.textContent = `+${deltaVal}`;
+      delta.classList.add("positive");
+    } else {
+      delta.textContent = "+0";
+    }
+
+    const movement = document.createElement("div");
+    movement.className = "lb-movement";
+    const arrow = row.movement === "up" ? "↑" : row.movement === "down" ? "↓" : "•";
+    movement.textContent = arrow;
+
+    const scoreWrap = document.createElement("div");
+    scoreWrap.className = "lb-score";
+    const scoreVal = document.createElement("span");
+    scoreVal.className = "lb-score-value";
+    scoreVal.textContent = row.prevScore.toLocaleString();
+    animateScoreValue(scoreVal, row.prevScore, row.score);
+    scoreWrap.appendChild(scoreVal);
+    scoreWrap.appendChild(delta);
+
+    body.appendChild(name);
+    body.appendChild(scoreWrap);
+
+    rowEl.appendChild(rank);
+    rowEl.appendChild(body);
+    rowEl.appendChild(movement);
+
+    leaderboardRowsEl.appendChild(rowEl);
+  });
+
+  if (shouldReduceMotion()) return;
+
+  requestAnimationFrame(() => {
+    leaderboardRowsEl.querySelectorAll(".lb-row").forEach((el) => {
+      const prev = prevRects.get(el.dataset.id);
+      const rect = el.getBoundingClientRect();
+      if (prev) {
+        const dx = prev.left - rect.left;
+        const dy = prev.top - rect.top;
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+          el.style.transform = `translate(${dx}px, ${dy}px)`;
+          el.style.transition = "none";
+          requestAnimationFrame(() => {
+            el.style.transition = "transform 520ms cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s ease";
+            el.style.transform = "translate(0, 0)";
+            el.style.opacity = 1;
+          });
+        }
+      } else {
+        el.classList.add("lb-row-enter");
+      }
+    });
+  });
+}
+
+async function buildLeaderboardRows(questionIds) {
+  if (!questionIds || !questionIds.length) return { rows: [], moreCount: 0 };
+  if (!participants.length && currentRoom) {
+    await fetchParticipants(currentRoom.id);
+  }
+  const answers = await fetchAnswersForQuestions(questionIds);
+  if (!participants.length) return { rows: [], moreCount: 0 };
+
+  const scoreMap = new Map(participants.map((p) => [p.id, 0]));
+  (answers || []).forEach((a) => {
+    if (!scoreMap.has(a.participant_id)) return;
+    const prev = scoreMap.get(a.participant_id) || 0;
+    scoreMap.set(a.participant_id, prev + (a.points || 0));
+  });
+
+  const rows = participants.map((p) => {
+    const prev = prevLeaderboardSnapshot.get(p.id);
+    const score = scoreMap.get(p.id) || 0;
+    return {
+      id: p.id,
+      name: p.name,
+      score,
+      prevScore: prev?.score ?? score,
+      prevRank: prev?.rank ?? null,
+    };
+  });
+
+  rows.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (a.prevRank && b.prevRank && a.prevRank !== b.prevRank) return a.prevRank - b.prevRank;
+    return a.name.localeCompare(b.name);
+  });
+
+  rows.forEach((row, idx) => {
+    row.rank = idx + 1;
+    const prevRank = row.prevRank ?? row.rank;
+    row.delta = row.score - row.prevScore;
+    row.movement = prevRank > row.rank ? "up" : prevRank < row.rank ? "down" : "same";
+  });
+
+  prevLeaderboardSnapshot = new Map(rows.map((r) => [r.id, { score: r.score, rank: r.rank }]));
+
+  const visibleRows = rows.slice(0, LEADERBOARD_SHOW_LIMIT);
+  const moreCount = Math.max(0, rows.length - visibleRows.length);
+  return { rows: visibleRows, moreCount };
+}
+
+async function showLeaderboardRevealForQuestion(questionId) {
+  if (!currentRoom || !questionId) return;
+  if (lastLeaderboardQuestionId === questionId) return;
+  if (!currentRoom.question_order || !currentRoom.question_order.length) return;
+
+  const idx = currentRoom.question_order.indexOf(questionId);
+  if (idx < 0) return;
+
+  const questionIds = currentRoom.question_order.slice(0, idx + 1);
+  const { rows, moreCount } = await buildLeaderboardRows(questionIds);
+  if (!rows.length) return;
+
+  ensureLeaderboardRevealElements();
+  updateLeaderboardCopy();
+  lastLeaderboardQuestionId = questionId;
+  renderLeaderboardRows(rows);
+  leaderboardMoreEl.classList.toggle("hidden", moreCount <= 0);
+  if (moreCount > 0) {
+    leaderboardMoreEl.textContent = currentLang === "tr" ? `+${moreCount} kişi daha` : `+${moreCount} more`;
+  }
+  leaderboardRevealEl.classList.remove("hidden");
+  void leaderboardRevealEl.offsetWidth;
+  leaderboardRevealEl.classList.add("show");
+  leaderboardCountdownEl.textContent = t("nextQuestionStarting");
+  if (leaderboardProgressEl) {
+    leaderboardProgressEl.style.transition = "none";
+    leaderboardProgressEl.style.width = "0%";
+    requestAnimationFrame(() => {
+      leaderboardProgressEl.style.transition = `width ${LEADERBOARD_REVEAL_MS}ms linear`;
+      leaderboardProgressEl.style.width = "100%";
+    });
+  }
+
+  const startedAt = Date.now();
+  if (leaderboardCountdownInterval) clearInterval(leaderboardCountdownInterval);
+  leaderboardCountdownInterval = setInterval(() => {
+    const elapsed = Date.now() - startedAt;
+    const remaining = Math.max(0, LEADERBOARD_REVEAL_MS - elapsed);
+    const seconds = Math.ceil(remaining / 1000);
+    leaderboardCountdownEl.textContent = `${t("nextQuestionStarting")} ${seconds}`;
+  }, 350);
+
+  playSound("reveal");
+  if (rows.some((r) => r.movement === "up" && r.rank <= 3 && (r.prevRank ?? 99) > 3)) {
+    playSound("rank-up");
+  }
+
+  if (leaderboardTimeout) clearTimeout(leaderboardTimeout);
+  leaderboardTimeout = setTimeout(() => {
+    hideLeaderboardReveal();
+  }, LEADERBOARD_REVEAL_MS);
 }
 
 function updateSoundToggle() {
@@ -442,6 +743,7 @@ function applyLanguage() {
   langEnBtn.classList.toggle("active", currentLang === "en");
 
   renderHelpSteps();
+  updateLeaderboardCopy();
 }
 
 function toggleTheme() {
@@ -453,6 +755,15 @@ function toggleTheme() {
 function applyTheme() {
   document.documentElement.setAttribute("data-theme", currentTheme);
   themeToggle.textContent = currentTheme === "dark" ? "🌙" : "☀️";
+}
+
+function updateLeaderboardCopy() {
+  if (!leaderboardRevealEl) return;
+  const title = leaderboardRevealEl.querySelector(".lb-title");
+  if (title) title.textContent = t("leaderboardTitle");
+  const label = leaderboardRevealEl.querySelector(".lb-label");
+  if (label) label.textContent = currentLang === "tr" ? "Tur güncellemesi" : "Round update";
+  if (leaderboardCountdownEl) leaderboardCountdownEl.textContent = t("nextQuestionStarting");
 }
 
 function ensureProfile() {
@@ -1600,6 +1911,10 @@ async function startQuiz() {
     return;
   }
 
+  prevLeaderboardSnapshot = new Map();
+  lastLeaderboardQuestionId = null;
+  hideLeaderboardReveal();
+
   const ids = questions.map((q) => q.id);
   const order = shuffle(ids);
   const now = new Date().toISOString();
@@ -1804,6 +2119,7 @@ function renderCurrentQuestion(opts = {}) {
     playScoreboardEl.classList.add("hidden");
     playScoreboardEl.innerHTML = "";
   }
+  hideLeaderboardReveal();
   const force = !!opts.force;
   if (!currentRoom || !currentRoom.question_order || currentRoom.question_order.length === 0) {
     playQuestionTextEl.textContent = currentLang === "tr" ? "Sorular yükleniyor..." : "Loading questions...";
@@ -1992,6 +2308,9 @@ function resetLocalPlayState() {
   playQuestionCounterEl.textContent = "";
   timerBarFill.style.width = "0%";
   timerDisplayEl.textContent = "--";
+  hideLeaderboardReveal();
+  prevLeaderboardSnapshot = new Map();
+  lastLeaderboardQuestionId = null;
 }
 
 function applyAnswerStateToUI(questionId) {
@@ -2116,6 +2435,7 @@ async function revealCorrectAnswerForEveryone() {
       : `Correct answer: ${letter}`;
 
   await showPostQuestionScoreboard();
+  await showLeaderboardRevealForQuestion(currentQuestion.id);
 
   if (myLastAnswerCorrect === true) {
     playSound("correct");
@@ -2128,7 +2448,7 @@ async function fetchAnswersForQuestions(questionIds) {
   if (!questionIds || !questionIds.length) return [];
   const { data, error } = await supabase
     .from("quiz_answers")
-    .select("participant_id,is_correct,question_id")
+    .select("participant_id,is_correct,question_id,points")
     .in("question_id", questionIds);
   if (error) {
     console.error("fetchAnswersForQuestions", error.message);
